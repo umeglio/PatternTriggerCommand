@@ -11,6 +11,9 @@
 #include <algorithm> // Per std::transform e case insensitive check
 #include <map>       // Per la mappatura pattern-comando
 
+// Autore: Umberto Meglio
+// Supporto alla creazione: Claude di Anthropic
+
 // Definizioni necessarie per compatibilità MinGW
 #ifndef ERROR_OPERATION_ABORTED
 #define ERROR_OPERATION_ABORTED 995L
@@ -58,7 +61,7 @@ struct SERVICE_DESCRIPTION_STRUCT {
 // Nome del servizio
 #define SERVICE_NAME "PatternTriggerCommand"
 #define SERVICE_DISPLAY_NAME "Pattern Trigger Command Service"
-#define SERVICE_DESCRIPTION "Monitora una cartella per file che corrispondono a pattern configurati ed esegue comandi associati"
+#define SERVICE_DESCRIPTION "Monitora cartelle multiple per file che corrispondono a pattern configurati ed esegue comandi associati"
 
 // Percorsi di default (possono essere sovrascritti dal file di configurazione)
 #define DEFAULT_MONITORED_FOLDER "C:\\Monitored"
@@ -82,7 +85,7 @@ SERVICE_STATUS_HANDLE serviceStatusHandle;
 // Handle per l'evento che controlla il servizio
 HANDLE stopEvent = NULL;
 
-// Set per tracciare i file già processati
+// Set per tracciare i file già processati (include il percorso completo per evitare conflitti)
 std::set<std::string> processedFiles;
 
 // Set per tracciare i file ignorati di recente (per evitare log ripetitivi)
@@ -92,24 +95,38 @@ std::set<std::string> recentlyIgnoredFiles;
 bool detailedLogging = true;
 
 // Percorsi configurabili
-std::string monitoredFolder = DEFAULT_MONITORED_FOLDER;
+std::string defaultMonitoredFolder = DEFAULT_MONITORED_FOLDER; // Cartella di default per retrocompatibilità
 std::string configFile = DEFAULT_CONFIG_FILE;
 std::string logFile = DEFAULT_LOG_FILE;
 std::string detailedLogFile = DEFAULT_DETAILED_LOG_FILE;
 std::string processedFilesDb = DEFAULT_PROCESSED_FILES_DB;
 
-// Struttura per memorizzare i pattern e i comandi associati
+// Struttura migliorata per memorizzare i pattern, le cartelle e i comandi associati
 struct PatternCommandPair {
-    std::string patternRegex;   // Pattern come espressione regolare
-    std::string command;        // Comando da eseguire
-    std::regex compiledRegex;   // Pattern compilato per efficienza
+    std::string folderPath;         // Cartella da monitorare per questo pattern
+    std::string patternRegex;       // Pattern come espressione regolare
+    std::string command;            // Comando da eseguire
+    std::regex compiledRegex;       // Pattern compilato per efficienza
+    std::string patternName;        // Nome del pattern per identificazione
     
-    PatternCommandPair(const std::string& pattern, const std::string& cmd) 
-        : patternRegex(pattern), command(cmd), compiledRegex(pattern) {}
+    PatternCommandPair(const std::string& folder, const std::string& pattern, 
+                      const std::string& cmd, const std::string& name = "") 
+        : folderPath(folder), patternRegex(pattern), command(cmd), 
+          compiledRegex(pattern), patternName(name) {}
 };
 
-// Vettore di configurazioni pattern-comando
+// Vettore di configurazioni pattern-comando con supporto multi-cartella
 std::vector<PatternCommandPair> patternCommandPairs;
+
+// Mappa per tenere traccia delle cartelle uniche e i loro handle di monitoraggio
+struct FolderMonitorInfo {
+    HANDLE hDir;
+    std::vector<int> patternIndices; // Indici dei pattern associati a questa cartella
+    OVERLAPPED overlapped;
+    BYTE buffer[4096];
+    bool active;
+};
+std::map<std::string, FolderMonitorInfo> monitoredFolders;
 
 // Funzione per ottenere un timestamp formattato
 std::string GetTimestamp() {
@@ -145,6 +162,23 @@ void WriteToLog(const std::string& message, bool detailed = false) {
             detailedLogFileStream.close();
         }
     }
+}
+
+// Normalizza il percorso di una cartella
+std::string NormalizeFolderPath(const std::string& path) {
+    std::string normalized = path;
+    // Sostituisci / con \
+    std::replace(normalized.begin(), normalized.end(), '/', '\\');
+    
+    // Rimuovi trailing slash se presente
+    if (!normalized.empty() && normalized.back() == '\\') {
+        normalized.pop_back();
+    }
+    
+    // Converti tutto in maiuscolo per confronti case-insensitive
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::toupper);
+    
+    return normalized;
 }
 
 // Funzione per verificare se dobbiamo loggare un file ignorato
@@ -209,28 +243,28 @@ void SaveProcessedFiles() {
     WriteToLog("Database dei file processati aggiornato", true);
 }
 
-// Funzione per aggiungere un file al set dei processati
-void MarkFileAsProcessed(const std::string& filename) {
+// Funzione per aggiungere un file al set dei processati (ora include il percorso completo)
+void MarkFileAsProcessed(const std::string& fullFilePath) {
     // Log di debug prima dell'inserimento
-    WriteToLog("Marcando file come processato: " + filename, true);
+    WriteToLog("Marcando file come processato: " + fullFilePath, true);
     
     // Verifica se il file è già stato processato (per sicurezza)
-    if (processedFiles.find(filename) != processedFiles.end()) {
-        WriteToLog("AVVISO: Il file " + filename + " era già presente nel database", true);
+    if (processedFiles.find(fullFilePath) != processedFiles.end()) {
+        WriteToLog("AVVISO: Il file " + fullFilePath + " era già presente nel database", true);
     } else {
-        WriteToLog("Nuovo file aggiunto al database: " + filename, true);
+        WriteToLog("Nuovo file aggiunto al database: " + fullFilePath, true);
     }
     
     // Aggiungi al set e salva
-    processedFiles.insert(filename);
+    processedFiles.insert(fullFilePath);
     
     // Salva immediatamente il database per evitare perdite in caso di crash
     SaveProcessedFiles();
 }
 
-// Funzione per verificare se un file è stato già processato
-bool IsFileAlreadyProcessed(const std::string& filename) {
-    return processedFiles.find(filename) != processedFiles.end();
+// Funzione per verificare se un file è stato già processato (ora usa il percorso completo)
+bool IsFileAlreadyProcessed(const std::string& fullFilePath) {
+    return processedFiles.find(fullFilePath) != processedFiles.end();
 }
 
 // Verifica l'esistenza di una directory e la crea se non esiste
@@ -356,7 +390,7 @@ bool WaitForFileAvailability(const std::string& filePath, int maxWaitTimeMs = 30
     return false;
 }
 
-// Funzione per leggere il file di configurazione
+// Funzione per leggere il file di configurazione con supporto multi-cartella
 bool LoadConfiguration() {
     WriteToLog("Caricamento configurazione da: " + configFile);
     
@@ -373,31 +407,35 @@ bool LoadConfiguration() {
         
         std::ofstream config(configFile.c_str());
         if (config.is_open()) {
-            config << "# PatternTriggerCommand Configuration File" << std::endl;
+            config << "# PatternTriggerCommand Configuration File - Multi-Folder Support" << std::endl;
+            config << "# Autore: Umberto Meglio - Supporto: Claude di Anthropic" << std::endl;
             config << "# Syntax: " << std::endl;
             config << "# [Settings]" << std::endl;
-            config << "# MonitoredFolder=C:\\Monitored" << std::endl;
+            config << "# DefaultMonitoredFolder=C:\\Monitored (cartella di default per retrocompatibilità)" << std::endl;
             config << "# LogFile=C:\\PTC\\PatternTriggerCommand.log" << std::endl;
             config << "# DetailedLogFile=C:\\PTC\\PatternTriggerCommand_detailed.log" << std::endl;
             config << "# ProcessedFilesDB=C:\\PTC\\PatternTriggerCommand_processed.txt" << std::endl;
             config << "# DetailedLogging=true" << std::endl;
             config << std::endl;
-            config << "# [Patterns]" << std::endl;
-            config << "# Pattern1=^doc.*\\..*$|C:\\Scripts\\process_doc.bat" << std::endl;
-            config << "# Pattern2=^invoice.*\\.pdf$|C:\\Scripts\\process_invoice.bat" << std::endl;
+            config << "# [Patterns] - Nuovo formato con supporto multi-cartella" << std::endl;
+            config << "# Pattern1=C:\\Folder1|^doc.*\\..*$|C:\\Scripts\\process_doc.bat" << std::endl;
+            config << "# Pattern2=C:\\Folder2|^invoice.*\\.pdf$|C:\\Scripts\\process_invoice.bat" << std::endl;
+            config << "# Pattern3=^report.*\\.xlsx$|C:\\Scripts\\process_report.bat (usa cartella di default)" << std::endl;
             config << std::endl;
             config << "[Settings]" << std::endl;
-            config << "MonitoredFolder=" << monitoredFolder << std::endl;
+            config << "DefaultMonitoredFolder=" << defaultMonitoredFolder << std::endl;
             config << "LogFile=" << logFile << std::endl;
             config << "DetailedLogFile=" << detailedLogFile << std::endl;
             config << "ProcessedFilesDB=" << processedFilesDb << std::endl;
             config << "DetailedLogging=" << (detailedLogging ? "true" : "false") << std::endl;
             config << std::endl;
             config << "[Patterns]" << std::endl;
-            config << "Pattern1=^doc.*\\..*$|C:\\Scripts\\process_doc.bat" << std::endl;
+            config << "Pattern1=C:\\Monitored\\Documents|^doc.*\\..*$|C:\\Scripts\\process_doc.bat" << std::endl;
+            config << "Pattern2=C:\\Monitored\\Invoices|^invoice.*\\.pdf$|C:\\Scripts\\process_invoice.bat" << std::endl;
+            config << "Pattern3=^report.*\\.xlsx$|C:\\Scripts\\process_report.bat" << std::endl;
             config.close();
             
-            WriteToLog("File di configurazione predefinito creato");
+            WriteToLog("File di configurazione predefinito creato con supporto multi-cartella");
         } else {
             WriteToLog("ERRORE: Impossibile creare il file di configurazione predefinito");
             return false;
@@ -457,8 +495,8 @@ bool LoadConfiguration() {
         
         // Processa le impostazioni in base alla sezione
         if (currentSection == "Settings") {
-            if (key == "MonitoredFolder") {
-                monitoredFolder = value;
+            if (key == "DefaultMonitoredFolder" || key == "MonitoredFolder") {
+                defaultMonitoredFolder = value;
             } else if (key == "LogFile") {
                 logFile = value;
             } else if (key == "DetailedLogFile") {
@@ -469,21 +507,54 @@ bool LoadConfiguration() {
                 detailedLogging = (value == "true" || value == "1" || value == "yes");
             }
         } else if (currentSection == "Patterns") {
-            // Pattern è nel formato: RegEx|Comando
-            size_t separatorPos = value.find('|');
-            if (separatorPos != std::string::npos) {
-                std::string pattern = value.substr(0, separatorPos);
-                std::string command = value.substr(separatorPos + 1);
-                
-                try {
-                    patternCommandPairs.emplace_back(pattern, command);
-                    hasPatterns = true;
-                    WriteToLog("Pattern caricato: '" + pattern + "' -> '" + command + "'", true);
-                } catch (const std::regex_error& e) {
-                    WriteToLog("ERRORE: Pattern regex non valido '" + pattern + "': " + e.what());
-                }
+            // Nuovo formato: Cartella|RegEx|Comando o RegEx|Comando (usa cartella di default)
+            std::vector<std::string> parts;
+            std::string temp = value;
+            
+            // Split sui caratteri |
+            size_t pos = 0;
+            while ((pos = temp.find('|')) != std::string::npos) {
+                parts.push_back(temp.substr(0, pos));
+                temp.erase(0, pos + 1);
+            }
+            if (!temp.empty()) {
+                parts.push_back(temp);
+            }
+            
+            std::string folderPath;
+            std::string pattern;
+            std::string command;
+            
+            if (parts.size() == 3) {
+                // Formato nuovo: Cartella|Pattern|Comando
+                folderPath = parts[0];
+                pattern = parts[1];
+                command = parts[2];
+            } else if (parts.size() == 2) {
+                // Formato vecchio: Pattern|Comando (usa cartella di default)
+                folderPath = defaultMonitoredFolder;
+                pattern = parts[0];
+                command = parts[1];
             } else {
                 WriteToLog("AVVISO: Pattern ignorato, formato non valido: " + value);
+                continue;
+            }
+            
+            // Rimuovi spazi dai componenti
+            folderPath.erase(0, folderPath.find_first_not_of(" \t"));
+            folderPath.erase(folderPath.find_last_not_of(" \t") + 1);
+            pattern.erase(0, pattern.find_first_not_of(" \t"));
+            pattern.erase(pattern.find_last_not_of(" \t") + 1);
+            command.erase(0, command.find_first_not_of(" \t"));
+            command.erase(command.find_last_not_of(" \t") + 1);
+            
+            try {
+                patternCommandPairs.emplace_back(folderPath, pattern, command, key);
+                hasPatterns = true;
+                WriteToLog("Pattern caricato: [" + key + "] Cartella: '" + folderPath + 
+                          "', Pattern: '" + pattern + "' -> Comando: '" + command + "'", true);
+            } catch (const std::regex_error& e) {
+                WriteToLog("ERRORE: Pattern regex non valido '" + pattern + "': " + e.what());
             }
         }
     }
@@ -497,35 +568,52 @@ bool LoadConfiguration() {
     }
     
     // Log delle impostazioni caricate
-    WriteToLog("Configurazione caricata:");
-    WriteToLog("  Cartella monitorata: " + monitoredFolder);
+    WriteToLog("Configurazione multi-cartella caricata:");
+    WriteToLog("  Cartella di default: " + defaultMonitoredFolder);
     WriteToLog("  File di log: " + logFile);
     WriteToLog("  File di log dettagliato: " + detailedLogFile);
     WriteToLog("  Database file processati: " + processedFilesDb);
     WriteToLog("  Log dettagliato: " + std::string(detailedLogging ? "attivato" : "disattivato"));
     WriteToLog("  Numero di pattern: " + std::to_string(patternCommandPairs.size()));
     
+    // Raggruppa i pattern per cartella
+    std::map<std::string, int> foldersCount;
+    for (const auto& pair : patternCommandPairs) {
+        foldersCount[NormalizeFolderPath(pair.folderPath)]++;
+    }
+    
+    WriteToLog("  Cartelle da monitorare: " + std::to_string(foldersCount.size()));
+    for (const auto& folder : foldersCount) {
+        WriteToLog("    " + folder.first + " (" + std::to_string(folder.second) + " pattern/s)");
+    }
+    
     return true;
 }
 
-// Trova un pattern che corrisponde al nome del file
-// Restituisce -1 se nessun pattern corrisponde
-int FindMatchingPattern(const std::string& filename) {
+// Trova pattern che corrispondono al nome del file in una specifica cartella
+// Restituisce un vettore di indici dei pattern che corrispondono
+std::vector<int> FindMatchingPatterns(const std::string& filename, const std::string& folderPath) {
+    std::vector<int> matchingPatterns;
+    std::string normalizedFolder = NormalizeFolderPath(folderPath);
+    
     for (size_t i = 0; i < patternCommandPairs.size(); ++i) {
         try {
-            if (std::regex_match(filename, patternCommandPairs[i].compiledRegex)) {
-                return static_cast<int>(i);
+            // Verifica che il pattern sia associato alla cartella corretta
+            if (NormalizeFolderPath(patternCommandPairs[i].folderPath) == normalizedFolder) {
+                if (std::regex_match(filename, patternCommandPairs[i].compiledRegex)) {
+                    matchingPatterns.push_back(static_cast<int>(i));
+                }
             }
         } catch (const std::regex_error& e) {
             WriteToLog("ERRORE durante il match del pattern '" + patternCommandPairs[i].patternRegex + 
                       "': " + e.what());
         }
     }
-    return -1;
+    return matchingPatterns;
 }
 
 // Esegue un comando con un parametro
-bool ExecuteCommand(const std::string& command, const std::string& parameter) {
+bool ExecuteCommand(const std::string& command, const std::string& parameter, const std::string& patternName) {
     // Verifica se è stato richiesto l'arresto del servizio
     if (WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0) {
         WriteToLog("Richiesta di arresto ricevuta, annullamento elaborazione comando", true);
@@ -538,19 +626,19 @@ bool ExecuteCommand(const std::string& command, const std::string& parameter) {
         return false;
     }
     
-    // Estrai solo il nome del file dal percorso completo
-    std::string filename = parameter.substr(parameter.find_last_of('\\') + 1);
+    // Usa il percorso completo del file per il tracking
+    std::string fullFilePath = parameter;
     
     // Verifica se il file è già stato processato (doppio controllo)
-    if (IsFileAlreadyProcessed(filename)) {
-        WriteToLog("SALTATO: File già elaborato in precedenza, non rielaborato: " + filename);
+    if (IsFileAlreadyProcessed(fullFilePath)) {
+        WriteToLog("SALTATO: File già elaborato in precedenza, non rielaborato: " + fullFilePath);
         return false;
     }
     
     // Attendi che il file sia disponibile (non in uso)
-    WriteToLog("Verifico se il file " + filename + " è disponibile...", true);
+    WriteToLog("Verifico se il file " + fullFilePath + " è disponibile...", true);
     if (!WaitForFileAvailability(parameter)) {
-        WriteToLog("ERRORE: File non disponibile dopo il timeout, saltato: " + filename);
+        WriteToLog("ERRORE: File non disponibile dopo il timeout, saltato: " + fullFilePath);
         return false;
     }
     
@@ -562,7 +650,7 @@ bool ExecuteCommand(const std::string& command, const std::string& parameter) {
     
     std::string commandLine = "\"" + command + "\" \"" + parameter + "\"";
     
-    WriteToLog("ELABORAZIONE: Esecuzione comando: " + commandLine);
+    WriteToLog("ELABORAZIONE: Esecuzione comando per pattern [" + patternName + "]: " + commandLine);
     
     STARTUPINFO si;
     PROCESS_INFORMATION pi;
@@ -602,8 +690,8 @@ bool ExecuteCommand(const std::string& command, const std::string& parameter) {
         } else {
             WriteToLog("COMPLETATO: Comando completato ma impossibile ottenere il codice di uscita");
         }
-        // Marca il file come processato
-        MarkFileAsProcessed(filename);
+        // Marca il file come processato usando il percorso completo
+        MarkFileAsProcessed(fullFilePath);
         success = true;
     } else if (waitResult == WAIT_OBJECT_0 + 1) {
         // L'evento stopEvent è stato segnalato
@@ -617,7 +705,7 @@ bool ExecuteCommand(const std::string& command, const std::string& parameter) {
         TerminateProcess(pi.hProcess, 1);
         // In caso di timeout, consideriamo comunque il file come processato
         // per evitare di elaborarlo nuovamente
-        MarkFileAsProcessed(filename);
+        MarkFileAsProcessed(fullFilePath);
         success = true;
     } else {
         WriteToLog("ERRORE: Errore nell'attesa del comando: " + std::to_string(GetLastError()));
@@ -641,12 +729,12 @@ bool ExecuteCommand(const std::string& command, const std::string& parameter) {
     return success;
 }
 
-// Configura il monitoraggio di una directory
-HANDLE SetupDirectoryMonitoring() {
-    WriteToLog("Configurazione monitoraggio directory: " + monitoredFolder);
+// Configura il monitoraggio di una directory specifica
+HANDLE SetupDirectoryMonitoring(const std::string& folderPath) {
+    WriteToLog("Configurazione monitoraggio directory: " + folderPath);
     
     HANDLE hDir = CreateFile(
-        monitoredFolder.c_str(),
+        folderPath.c_str(),
         FILE_LIST_DIRECTORY,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         NULL,
@@ -656,80 +744,120 @@ HANDLE SetupDirectoryMonitoring() {
     );
     
     if (hDir == INVALID_HANDLE_VALUE) {
-        WriteToLog("Errore nell'apertura della directory: " + std::to_string(GetLastError()));
+        WriteToLog("Errore nell'apertura della directory: " + folderPath + " - " + std::to_string(GetLastError()));
         return INVALID_HANDLE_VALUE;
     }
     
-    WriteToLog("Directory aperta con successo, handle: " + std::to_string((DWORD)hDir), true);
+    WriteToLog("Directory aperta con successo: " + folderPath + ", handle: " + std::to_string((DWORD)hDir), true);
     return hDir;
 }
 
-// Esegue una scansione completa della directory e processa i file trovati
-void ScanDirectoryForFiles() {
-    WriteToLog("Scansione iniziale della cartella per file esistenti...");
-    int filesFound = 0;
-    int matchingFilesFound = 0;
-    int filesProcessed = 0;
-    int filesSkipped = 0;
+// Esegue una scansione completa delle directory e processa i file trovati
+void ScanDirectoriesForFiles() {
+    WriteToLog("Scansione iniziale di tutte le cartelle monitorate per file esistenti...");
+    int totalFilesFound = 0;
+    int totalMatchingFilesFound = 0;
+    int totalFilesProcessed = 0;
+    int totalFilesSkipped = 0;
     
-    // Apri la directory
-    std::string searchPath = monitoredFolder + "\\*.*";
-    WIN32_FIND_DATA findData;
-    HANDLE hFind = FindFirstFile(searchPath.c_str(), &findData);
-    
-    if (hFind == INVALID_HANDLE_VALUE) {
-        WriteToLog("Errore nell'apertura directory per scansione: " + std::to_string(GetLastError()));
-        return;
+    // Raggruppa i pattern per cartella per efficienza
+    std::map<std::string, std::vector<int>> folderPatterns;
+    for (size_t i = 0; i < patternCommandPairs.size(); ++i) {
+        std::string normalizedFolder = NormalizeFolderPath(patternCommandPairs[i].folderPath);
+        folderPatterns[normalizedFolder].push_back(static_cast<int>(i));
     }
     
-    do {
-        // Controlla se è una richiesta di arresto
-        if (WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0) {
-            WriteToLog("Richiesta di arresto durante la scansione iniziale");
-            break;
-        }
+    // Scansiona ogni cartella
+    for (const auto& folderGroup : folderPatterns) {
+        std::string folderPath = patternCommandPairs[folderGroup.second[0]].folderPath; // Prendi il percorso originale
+        WriteToLog("Scansione cartella: " + folderPath + " (con " + std::to_string(folderGroup.second.size()) + " pattern/s)");
         
-        // Salta le directory (incluso . e ..)
-        if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        int filesFound = 0;
+        int matchingFilesFound = 0;
+        int filesProcessed = 0;
+        int filesSkipped = 0;
+        
+        // Apri la directory
+        std::string searchPath = folderPath + "\\*.*";
+        WIN32_FIND_DATA findData;
+        HANDLE hFind = FindFirstFile(searchPath.c_str(), &findData);
+        
+        if (hFind == INVALID_HANDLE_VALUE) {
+            WriteToLog("Errore nell'apertura directory per scansione: " + folderPath + " - " + std::to_string(GetLastError()));
             continue;
         }
         
-        // Incrementa il contatore dei file totali
-        filesFound++;
-        
-        std::string filename = findData.cFileName;
-        
-        // Controlla se il file corrisponde a uno dei pattern
-        int patternIndex = FindMatchingPattern(filename);
-        if (patternIndex >= 0) {
-            matchingFilesFound++;
-            
-            // Controlla se è già stato processato
-            if (!IsFileAlreadyProcessed(filename)) {
-                WriteToLog("File corrispondente al pattern trovato (da elaborare): " + filename);
-                std::string fullPath = monitoredFolder + "\\" + filename;
-                
-                // Elabora il file con il comando associato al pattern
-                if (ExecuteCommand(patternCommandPairs[patternIndex].command, fullPath)) {
-                    filesProcessed++;
-                }
-            } else {
-                // File già processato
-                if (ShouldLogIgnoredFile(filename)) {
-                    WriteToLog("IGNORATO: File già processato: " + filename);
-                }
-                filesSkipped++;
+        do {
+            // Controlla se è una richiesta di arresto
+            if (WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0) {
+                WriteToLog("Richiesta di arresto durante la scansione iniziale");
+                FindClose(hFind);
+                return;
             }
-        }
-    } while (FindNextFile(hFind, &findData));
+            
+            // Salta le directory (incluso . e ..)
+            if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                continue;
+            }
+            
+            // Incrementa il contatore dei file totali
+            filesFound++;
+            
+            std::string filename = findData.cFileName;
+            std::string fullPath = folderPath + "\\" + filename;
+            
+            // Controlla se il file corrisponde a uno dei pattern per questa cartella
+            std::vector<int> matchingPatterns = FindMatchingPatterns(filename, folderPath);
+            if (!matchingPatterns.empty()) {
+                matchingFilesFound++;
+                
+                // Controlla se è già stato processato (usando il percorso completo)
+                if (!IsFileAlreadyProcessed(fullPath)) {
+                    WriteToLog("File corrispondente al pattern trovato (da elaborare): " + fullPath);
+                    
+                    // Elabora il file con tutti i comandi associati ai pattern corrispondenti
+                    for (int patternIndex : matchingPatterns) {
+                        if (ExecuteCommand(patternCommandPairs[patternIndex].command, fullPath, 
+                                         patternCommandPairs[patternIndex].patternName)) {
+                            filesProcessed++;
+                        }
+                        
+                        // Verifica se è stato richiesto l'arresto del servizio
+                        if (WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0) {
+                            WriteToLog("Richiesta di arresto durante elaborazione scansione");
+                            FindClose(hFind);
+                            return;
+                        }
+                    }
+                } else {
+                    // File già processato
+                    if (ShouldLogIgnoredFile(fullPath)) {
+                        WriteToLog("IGNORATO: File già processato: " + fullPath);
+                    }
+                    filesSkipped++;
+                }
+            }
+        } while (FindNextFile(hFind, &findData));
+        
+        // Chiudi l'handle di ricerca
+        FindClose(hFind);
+        
+        WriteToLog("Scansione cartella " + folderPath + " completata - Trovati: " + std::to_string(filesFound) + 
+                   ", Corrispondenti: " + std::to_string(matchingFilesFound) +
+                   ", Elaborati: " + std::to_string(filesProcessed) + 
+                   ", Ignorati: " + std::to_string(filesSkipped));
+        
+        // Aggiorna i totali
+        totalFilesFound += filesFound;
+        totalMatchingFilesFound += matchingFilesFound;
+        totalFilesProcessed += filesProcessed;
+        totalFilesSkipped += filesSkipped;
+    }
     
-    // Chiudi l'handle di ricerca
-    FindClose(hFind);
-    
-    WriteToLog("Scansione iniziale completata - Trovati: " + std::to_string(filesFound) + 
-               ", File corrispondenti: " + std::to_string(matchingFilesFound) +
-               ", Elaborati: " + std::to_string(filesProcessed) + 
-               ", Ignorati: " + std::to_string(filesSkipped));
+    WriteToLog("Scansione iniziale globale completata - Totale trovati: " + std::to_string(totalFilesFound) + 
+               ", Totale corrispondenti: " + std::to_string(totalMatchingFilesFound) +
+               ", Totale elaborati: " + std::to_string(totalFilesProcessed) + 
+               ", Totale ignorati: " + std::to_string(totalFilesSkipped));
 }
 
 // Funzione per gestire gli eventi di console (CTRL+C, ecc.)
@@ -744,9 +872,9 @@ BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) {
     return FALSE;  // Non abbiamo gestito l'evento
 }
 
-// Funzione principale del servizio
+// Funzione principale del servizio con supporto multi-cartella
 DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
-    WriteToLog("Servizio avviato - verificando requisiti...");
+    WriteToLog("Servizio multi-cartella avviato - verificando requisiti...");
     
     // Carica la configurazione
     if (!LoadConfiguration()) {
@@ -766,16 +894,23 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
     // Pulisci la cache dei file ignorati all'avvio
     recentlyIgnoredFiles.clear();
     
-    // Verifica che le directory necessarie esistano
-    if (!EnsureDirectoryExists(monitoredFolder)) {
-        WriteToLog("ERRORE FATALE: Impossibile accedere o creare la directory di monitoraggio");
-        return 1;
+    // Verifica che tutte le directory necessarie esistano e le crea se necessario
+    std::set<std::string> uniqueFolders;
+    for (const auto& pair : patternCommandPairs) {
+        uniqueFolders.insert(pair.folderPath);
     }
     
-    WriteToLog("Tutti i requisiti verificati, avvio monitoraggio...");
+    for (const auto& folder : uniqueFolders) {
+        if (!EnsureDirectoryExists(folder)) {
+            WriteToLog("ERRORE FATALE: Impossibile accedere o creare la directory di monitoraggio: " + folder);
+            return 1;
+        }
+    }
     
-    // Scansione iniziale per processare i file esistenti
-    ScanDirectoryForFiles();
+    WriteToLog("Tutti i requisiti verificati, avvio monitoraggio multi-cartella...");
+    
+    // Scansione iniziale per processare i file esistenti in tutte le cartelle
+    ScanDirectoriesForFiles();
     
     // Se è stata richiesta la terminazione durante la scansione iniziale, esci
     if (WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0) {
@@ -783,17 +918,31 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
         return 0;
     }
     
-    // Variabili per il monitoraggio
-    HANDLE hDir = INVALID_HANDLE_VALUE;
-    OVERLAPPED overlapped;
-    BYTE buffer[4096];
-    DWORD bytesReturned;
+    // Inizializza le strutture di monitoraggio per ogni cartella unica
+    monitoredFolders.clear();
+    for (const auto& folder : uniqueFolders) {
+        std::string normalizedFolder = NormalizeFolderPath(folder);
+        FolderMonitorInfo& info = monitoredFolders[normalizedFolder];
+        info.hDir = INVALID_HANDLE_VALUE;
+        info.active = false;
+        
+        // Trova tutti i pattern associati a questa cartella
+        for (size_t i = 0; i < patternCommandPairs.size(); ++i) {
+            if (NormalizeFolderPath(patternCommandPairs[i].folderPath) == normalizedFolder) {
+                info.patternIndices.push_back(static_cast<int>(i));
+            }
+        }
+        
+        WriteToLog("Configurato monitoraggio per cartella: " + folder + " (" + 
+                   std::to_string(info.patternIndices.size()) + " pattern/s associati)", true);
+    }
+    
     bool running = true;
     
     // Inizializza un timer per pulire periodicamente la cache dei file ignorati
     DWORD lastCacheCleanupTime = GetTickCount();
     
-    WriteToLog("Avvio ciclo di monitoraggio principale");
+    WriteToLog("Avvio ciclo di monitoraggio principale multi-cartella");
     
     while (running) {
         // Verifica se è richiesta la terminazione del servizio
@@ -810,108 +959,140 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
             lastCacheCleanupTime = currentTime;
         }
         
-        // Se il handle della directory non è valido, configuralo
-        if (hDir == INVALID_HANDLE_VALUE) {
-            hDir = SetupDirectoryMonitoring();
-            if (hDir == INVALID_HANDLE_VALUE) {
-                WriteToLog("Impossibile configurare il monitoraggio della directory, riprovo tra 5 secondi");
-                Sleep(5000);
+        // Configura il monitoraggio per tutte le cartelle
+        std::vector<HANDLE> waitHandles;
+        std::vector<std::string> handleToFolder;
+        
+        waitHandles.push_back(stopEvent); // Primo handle è sempre l'evento di stop
+        handleToFolder.push_back(""); // Placeholder per stopEvent
+        
+        for (auto& folderPair : monitoredFolders) {
+            const std::string& normalizedFolder = folderPair.first;
+            FolderMonitorInfo& info = folderPair.second;
+            
+            // Trova il percorso originale
+            std::string originalFolder = patternCommandPairs[info.patternIndices[0]].folderPath;
+            
+            // Se il handle della directory non è valido, configuralo
+            if (info.hDir == INVALID_HANDLE_VALUE) {
+                info.hDir = SetupDirectoryMonitoring(originalFolder);
+                if (info.hDir == INVALID_HANDLE_VALUE) {
+                    WriteToLog("Impossibile configurare il monitoraggio della directory: " + originalFolder);
+                    continue;
+                }
+            }
+            
+            // Inizializza la struttura overlapped per I/O asincrono
+            ZeroMemory(&info.overlapped, sizeof(info.overlapped));
+            info.overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+            
+            if (!info.overlapped.hEvent) {
+                WriteToLog("Errore nella creazione dell'evento per I/O asincrono per cartella: " + originalFolder + 
+                           " - " + std::to_string(GetLastError()));
+                if (info.hDir != INVALID_HANDLE_VALUE) {
+                    CloseHandle(info.hDir);
+                    info.hDir = INVALID_HANDLE_VALUE;
+                }
                 continue;
             }
+            
+            WriteToLog("Avvio ReadDirectoryChangesW per cartella: " + originalFolder, true);
+            
+            // Imposta notifiche per modifiche alla directory in modo asincrono
+            BOOL success = ReadDirectoryChangesW(
+                info.hDir,
+                info.buffer,
+                sizeof(info.buffer),
+                FALSE,  // Non monitorare sottocartelle
+                FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE,
+                NULL,
+                &info.overlapped,  // Operazione asincrona
+                NULL
+            );
+            
+            if (!success && GetLastError() != ERROR_IO_PENDING) {
+                DWORD error = GetLastError();
+                WriteToLog("Errore in ReadDirectoryChangesW per cartella " + originalFolder + ": " + std::to_string(error));
+                CloseHandle(info.overlapped.hEvent);
+                info.overlapped.hEvent = NULL;
+                
+                if (info.hDir != INVALID_HANDLE_VALUE) {
+                    CloseHandle(info.hDir);
+                    info.hDir = INVALID_HANDLE_VALUE;
+                }
+                continue;
+            }
+            
+            // Aggiungi l'handle alla lista di attesa
+            waitHandles.push_back(info.overlapped.hEvent);
+            handleToFolder.push_back(normalizedFolder);
+            info.active = true;
         }
         
-        // Inizializza la struttura overlapped per I/O asincrono
-        ZeroMemory(&overlapped, sizeof(overlapped));
-        overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-        
-        if (!overlapped.hEvent) {
-            WriteToLog("Errore nella creazione dell'evento per I/O asincrono: " + 
-                       std::to_string(GetLastError()));
-            if (hDir != INVALID_HANDLE_VALUE) {
-                CloseHandle(hDir);
-                hDir = INVALID_HANDLE_VALUE;
-            }
-            Sleep(1000);
+        // Se non ci sono cartelle attive, attendi e riprova
+        if (waitHandles.size() <= 1) {
+            WriteToLog("Nessuna cartella attiva per il monitoraggio, attendo 5 secondi prima di riprovare");
+            Sleep(5000);
             continue;
         }
         
-        WriteToLog("Avvio ReadDirectoryChangesW per monitorare modifiche...", true);
-        
-        // Imposta notifiche per modifiche alla directory in modo asincrono
-        BOOL success = ReadDirectoryChangesW(
-            hDir,
-            buffer,
-            sizeof(buffer),
-            FALSE,  // Non monitorare sottocartelle
-            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE,
-            &bytesReturned,
-            &overlapped,  // Operazione asincrona
-            NULL
+        // Attendi eventi da qualsiasi cartella o il segnale di arresto
+        DWORD waitResult = WaitForMultipleObjects(
+            static_cast<DWORD>(waitHandles.size()), 
+            waitHandles.data(), 
+            FALSE, 
+            DIR_CHANGES_WAIT_TIMEOUT
         );
-        
-        if (!success && GetLastError() != ERROR_IO_PENDING) {
-            DWORD error = GetLastError();
-            WriteToLog("Errore in ReadDirectoryChangesW: " + std::to_string(error));
-            CloseHandle(overlapped.hEvent);
-            
-            // Se il handle è invalido, chiudilo e riprova
-            if (hDir != INVALID_HANDLE_VALUE) {
-                CloseHandle(hDir);
-                hDir = INVALID_HANDLE_VALUE;
-            }
-            
-            Sleep(1000);
-            continue;
-        }
-        
-        // Configurazione degli handle per l'attesa
-        HANDLE waitHandles[2] = { stopEvent, overlapped.hEvent };
-        
-        // Attendi o una modifica alla directory o un segnale di arresto
-        DWORD waitResult = WaitForMultipleObjects(2, waitHandles, FALSE, DIR_CHANGES_WAIT_TIMEOUT);
         
         if (waitResult == WAIT_OBJECT_0) {
             // Evento di arresto segnalato
-            WriteToLog("Richiesta di arresto durante l'attesa di modifiche alla directory");
-            if (hDir != INVALID_HANDLE_VALUE) {
-                CancelIoEx(hDir, &overlapped);
-                CloseHandle(hDir);
-                hDir = INVALID_HANDLE_VALUE;
-            }
-            CloseHandle(overlapped.hEvent);
+            WriteToLog("Richiesta di arresto durante l'attesa di modifiche alle directory");
             running = false;
             break;
         }
-        else if (waitResult == WAIT_OBJECT_0 + 1) {
-            // Evento di modifica alla directory segnalato
+        else if (waitResult >= WAIT_OBJECT_0 + 1 && waitResult < WAIT_OBJECT_0 + waitHandles.size()) {
+            // Evento di modifica a una directory segnalato
+            size_t folderIndex = waitResult - WAIT_OBJECT_0;
+            std::string normalizedFolder = handleToFolder[folderIndex];
+            FolderMonitorInfo& info = monitoredFolders[normalizedFolder];
+            std::string originalFolder = patternCommandPairs[info.patternIndices[0]].folderPath;
+            
             DWORD bytesTransferred = 0;
-            if (!GetOverlappedResult(hDir, &overlapped, &bytesTransferred, FALSE)) {
+            if (!GetOverlappedResult(info.hDir, &info.overlapped, &bytesTransferred, FALSE)) {
                 DWORD error = GetLastError();
-                WriteToLog("Errore in GetOverlappedResult: " + std::to_string(error));
-                CloseHandle(overlapped.hEvent);
+                WriteToLog("Errore in GetOverlappedResult per cartella " + originalFolder + ": " + std::to_string(error));
                 
-                // Se la richiesta è stata annullata, probabilmente stiamo arrestando il servizio
-                if (error == ERROR_OPERATION_ABORTED) {
-                    if (hDir != INVALID_HANDLE_VALUE) {
-                        CloseHandle(hDir);
-                        hDir = INVALID_HANDLE_VALUE;
-                    }
-                    continue;
+                // Pulisci l'handle problematico
+                if (info.overlapped.hEvent) {
+                    CloseHandle(info.overlapped.hEvent);
+                    info.overlapped.hEvent = NULL;
                 }
                 
+                if (error == ERROR_OPERATION_ABORTED) {
+                    if (info.hDir != INVALID_HANDLE_VALUE) {
+                        CloseHandle(info.hDir);
+                        info.hDir = INVALID_HANDLE_VALUE;
+                    }
+                }
+                
+                info.active = false;
                 continue;
             }
             
             if (bytesTransferred == 0) {
-                WriteToLog("Nessuna modifica rilevata, continuazione monitoraggio", true);
-                CloseHandle(overlapped.hEvent);
+                WriteToLog("Nessuna modifica rilevata per cartella: " + originalFolder, true);
+                if (info.overlapped.hEvent) {
+                    CloseHandle(info.overlapped.hEvent);
+                    info.overlapped.hEvent = NULL;
+                }
+                info.active = false;
                 continue;
             }
             
-            WriteToLog("Modifiche rilevate nella directory", true);
+            WriteToLog("Modifiche rilevate nella cartella: " + originalFolder, true);
             
-            // Processa le notifiche
-            FILE_NOTIFY_INFORMATION* fni = (FILE_NOTIFY_INFORMATION*)buffer;
+            // Processa le notifiche per questa cartella
+            FILE_NOTIFY_INFORMATION* fni = (FILE_NOTIFY_INFORMATION*)info.buffer;
             bool fileProcessed = false;
             
             do {
@@ -960,22 +1141,24 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
                         actionName = "UNKNOWN(" + std::to_string(fni->Action) + ")";
                 }
                 
-                WriteToLog("Notifica file: " + actionName + " - " + strFilename, true);
+                WriteToLog("Notifica file in " + originalFolder + ": " + actionName + " - " + strFilename, true);
                 
-                // Verifica se il file corrisponde a uno dei pattern configurati
-                int patternIndex = FindMatchingPattern(strFilename);
+                // Verifica se il file corrisponde a uno dei pattern configurati per questa cartella
+                std::vector<int> matchingPatterns = FindMatchingPatterns(strFilename, originalFolder);
                 
-                // Verifica se il file è un doc file e deve essere processato
+                // Verifica se il file deve essere processato
                 if ((fni->Action == FILE_ACTION_ADDED || 
                      fni->Action == FILE_ACTION_RENAMED_NEW_NAME || 
                      fni->Action == FILE_ACTION_MODIFIED) && 
-                    patternIndex >= 0) {
+                    !matchingPatterns.empty()) {
+                    
+                    std::string fullPath = originalFolder + "\\" + strFilename;
                     
                     // Verifica se il file è già stato processato - migliorato per evitare log ripetitivi
-                    if (IsFileAlreadyProcessed(strFilename)) {
+                    if (IsFileAlreadyProcessed(fullPath)) {
                         // Log solo se non è stato recentemente ignorato
-                        if (ShouldLogIgnoredFile(strFilename)) {
-                            WriteToLog("IGNORATO: File già elaborato in precedenza: " + strFilename);
+                        if (ShouldLogIgnoredFile(fullPath)) {
+                            WriteToLog("IGNORATO: File già elaborato in precedenza: " + fullPath);
                         }
                         
                         // Passa al record successivo
@@ -987,48 +1170,28 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
                         }
                     }
                     
-                    WriteToLog("File corrispondente al pattern rilevato: " + strFilename + 
-                              " (azione: " + actionName + ", pattern: " + 
-                              patternCommandPairs[patternIndex].patternRegex + ")");
+                    WriteToLog("File corrispondente a " + std::to_string(matchingPatterns.size()) + 
+                              " pattern/s rilevato: " + fullPath + " (azione: " + actionName + ")");
                     
-                    // Costruisci il percorso completo
-                    std::string fullPath = monitoredFolder + "\\" + strFilename;
-                    
-                    // Chiudi gli handle prima di elaborare il file
-                    CloseHandle(overlapped.hEvent);
-                    if (hDir != INVALID_HANDLE_VALUE) {
-                        CancelIoEx(hDir, NULL);
-                        CloseHandle(hDir);
-                        hDir = INVALID_HANDLE_VALUE;
+                    // Esegui tutti i comandi associati ai pattern corrispondenti
+                    for (int patternIndex : matchingPatterns) {
+                        WriteToLog("Elaborazione con pattern [" + patternCommandPairs[patternIndex].patternName + 
+                                  "]: " + patternCommandPairs[patternIndex].patternRegex);
+                        
+                        if (ExecuteCommand(patternCommandPairs[patternIndex].command, fullPath, 
+                                         patternCommandPairs[patternIndex].patternName)) {
+                            fileProcessed = true;
+                        }
+                        
+                        // Verifica se è stato richiesto l'arresto del servizio
+                        if (WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0) {
+                            WriteToLog("Richiesta di arresto ricevuta dopo elaborazione comando");
+                            running = false;
+                            break;
+                        }
                     }
                     
-                    // Esegui il comando con il nome del file come parametro
-                    if (ExecuteCommand(patternCommandPairs[patternIndex].command, fullPath)) {
-                        fileProcessed = true;
-                    }
-                    
-                    // Verifica se è stato richiesto l'arresto del servizio
-                    if (WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0) {
-                        WriteToLog("Richiesta di arresto ricevuta dopo elaborazione comando");
-                        running = false;
-                        break;
-                    }
-                    
-                    // Ricrea gli handle necessari per continuare il monitoraggio
-                    // dopo aver elaborato il file
-                    hDir = SetupDirectoryMonitoring();
-                    if (hDir == INVALID_HANDLE_VALUE) {
-                        WriteToLog("Impossibile riconfigurare il monitoraggio dopo elaborazione file, riproverò nel prossimo ciclo");
-                        break;
-                    }
-                    
-                    // Anche se abbiamo elaborato un file, procediamo con gli altri file nella notifica
-                    if (fni->NextEntryOffset != 0) {
-                        fni = (FILE_NOTIFY_INFORMATION*)((BYTE*)fni + fni->NextEntryOffset);
-                        continue;
-                    } else {
-                        break;
-                    }
+                    if (!running) break;
                 }
                 
                 // Passa al record successivo
@@ -1039,43 +1202,65 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
                 fni = (FILE_NOTIFY_INFORMATION*)((BYTE*)fni + fni->NextEntryOffset);
             } while (true);
             
-            // Se è stato elaborato un file o c'è stata una richiesta di arresto, 
-            // ricominciamo il ciclo di monitoraggio
-            if (fileProcessed || !running) {
-                // Se abbiamo già chiuso gli handle nel ciclo sopra, non dobbiamo chiuderli di nuovo
-                if (hDir == INVALID_HANDLE_VALUE) {
-                    // Non c'è bisogno di chiudere overlapped.hEvent se l'abbiamo già chiuso
-                    continue;
-                } else {
-                    // Altrimenti chiudi l'handle dell'evento
-                    CloseHandle(overlapped.hEvent);
-                }
+            // Pulisci l'handle dell'evento per questa cartella
+            if (info.overlapped.hEvent) {
+                CloseHandle(info.overlapped.hEvent);
+                info.overlapped.hEvent = NULL;
             }
-            else {
-                // Se non è stato elaborato alcun file (ma abbiamo ricevuto notifiche),
-                // dobbiamo rilasciare l'handle dell'evento
-                CloseHandle(overlapped.hEvent);
+            info.active = false;
+            
+            // Se è stato elaborato un file, reinizializza tutti i monitoraggi
+            if (fileProcessed) {
+                WriteToLog("File elaborato, reinizializzo monitoraggio cartelle", true);
+                // Chiudi tutti i handle attivi
+                for (auto& folderPair : monitoredFolders) {
+                    FolderMonitorInfo& folderInfo = folderPair.second;
+                    if (folderInfo.hDir != INVALID_HANDLE_VALUE) {
+                        CancelIoEx(folderInfo.hDir, NULL);
+                        CloseHandle(folderInfo.hDir);
+                        folderInfo.hDir = INVALID_HANDLE_VALUE;
+                    }
+                    if (folderInfo.overlapped.hEvent) {
+                        CloseHandle(folderInfo.overlapped.hEvent);
+                        folderInfo.overlapped.hEvent = NULL;
+                    }
+                    folderInfo.active = false;
+                }
             }
         }
         else if (waitResult == WAIT_TIMEOUT) {
             // Timeout sull'attesa delle modifiche, continua il loop
-            WriteToLog("Timeout nell'attesa di modifiche alla directory", true);
+            WriteToLog("Timeout nell'attesa di modifiche alle directory", true);
             
-            // Cancella l'operazione pendente
-            if (hDir != INVALID_HANDLE_VALUE) {
-                CancelIoEx(hDir, &overlapped);
+            // Pulisci tutti gli handle overlapped
+            for (auto& folderPair : monitoredFolders) {
+                FolderMonitorInfo& folderInfo = folderPair.second;
+                if (folderInfo.active && folderInfo.hDir != INVALID_HANDLE_VALUE) {
+                    CancelIoEx(folderInfo.hDir, &folderInfo.overlapped);
+                }
+                if (folderInfo.overlapped.hEvent) {
+                    CloseHandle(folderInfo.overlapped.hEvent);
+                    folderInfo.overlapped.hEvent = NULL;
+                }
+                folderInfo.active = false;
             }
-            
-            CloseHandle(overlapped.hEvent);
         }
         else {
             // Errore nell'attesa
             WriteToLog("Errore durante l'attesa: " + std::to_string(GetLastError()));
-            CloseHandle(overlapped.hEvent);
             
-            if (hDir != INVALID_HANDLE_VALUE) {
-                CloseHandle(hDir);
-                hDir = INVALID_HANDLE_VALUE;
+            // Pulisci tutti gli handle
+            for (auto& folderPair : monitoredFolders) {
+                FolderMonitorInfo& folderInfo = folderPair.second;
+                if (folderInfo.overlapped.hEvent) {
+                    CloseHandle(folderInfo.overlapped.hEvent);
+                    folderInfo.overlapped.hEvent = NULL;
+                }
+                if (folderInfo.hDir != INVALID_HANDLE_VALUE) {
+                    CloseHandle(folderInfo.hDir);
+                    folderInfo.hDir = INVALID_HANDLE_VALUE;
+                }
+                folderInfo.active = false;
             }
             
             // Pausa prima di riprovare
@@ -1086,12 +1271,18 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
     // Salva il database dei file processati
     SaveProcessedFiles();
     
-    // Pulisci le risorse
-    if (hDir != INVALID_HANDLE_VALUE) {
-        CloseHandle(hDir);
+    // Pulisci tutte le risorse
+    for (auto& folderPair : monitoredFolders) {
+        FolderMonitorInfo& folderInfo = folderPair.second;
+        if (folderInfo.hDir != INVALID_HANDLE_VALUE) {
+            CloseHandle(folderInfo.hDir);
+        }
+        if (folderInfo.overlapped.hEvent) {
+            CloseHandle(folderInfo.overlapped.hEvent);
+        }
     }
     
-    WriteToLog("Thread del servizio terminato");
+    WriteToLog("Thread del servizio multi-cartella terminato");
     return 0;
 }
 
@@ -1185,7 +1376,6 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR *argv) {
         WriteToLog("SetServiceStatus error");
     }
     
-    // Utilizza INFINITE invece di un timeout
     // Attendi che il thread del servizio termini - senza timeout
     WaitForSingleObject(hThread, INFINITE);
     
@@ -1214,7 +1404,8 @@ int main(int argc, char* argv[]) {
     SetCurrentDirectory(baseDir.c_str());
     
     WriteToLog("-------------------------", false);
-    WriteToLog("Avvio applicazione PatternTriggerCommand");
+    WriteToLog("Avvio applicazione PatternTriggerCommand Multi-Folder");
+    WriteToLog("Autore: Umberto Meglio - Supporto: Claude di Anthropic");
     
     // Controlla se ci sono parametri per il log dettagliato
     if (argc > 1) {
@@ -1299,8 +1490,8 @@ int main(int argc, char* argv[]) {
                        std::to_string(GetLastError()));
         }
         
-        WriteToLog("Servizio installato con successo");
-        std::cout << "Servizio installato con successo." << std::endl;
+        WriteToLog("Servizio multi-cartella installato con successo");
+        std::cout << "Servizio multi-cartella installato con successo." << std::endl;
         
         CloseServiceHandle(schService);
         CloseServiceHandle(schSCManager);
@@ -1348,8 +1539,8 @@ int main(int argc, char* argv[]) {
     }
     // Se il programma viene eseguito con l'argomento "test", esegue un test
     else if (argc > 1 && strcmp(argv[1], "test") == 0) {
-        WriteToLog("Modalità test");
-        std::cout << "Test del servizio in modalità console..." << std::endl;
+        WriteToLog("Modalità test multi-cartella");
+        std::cout << "Test del servizio multi-cartella in modalità console..." << std::endl;
         
         // Carica la configurazione
         if (!LoadConfiguration()) {
@@ -1357,13 +1548,25 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         
-        std::cout << "Configurazione caricata:" << std::endl;
-        std::cout << "  Cartella monitorata: " << monitoredFolder << std::endl;
+        std::cout << "Configurazione multi-cartella caricata:" << std::endl;
+        std::cout << "  Cartella di default: " << defaultMonitoredFolder << std::endl;
         std::cout << "  File di log: " << logFile << std::endl;
         std::cout << "  Pattern configurati: " << patternCommandPairs.size() << std::endl;
+        
+        // Raggruppa i pattern per cartella per la visualizzazione
+        std::map<std::string, std::vector<int>> folderPatterns;
         for (size_t i = 0; i < patternCommandPairs.size(); ++i) {
-            std::cout << "    Pattern " << (i+1) << ": '" << patternCommandPairs[i].patternRegex 
-                      << "' -> '" << patternCommandPairs[i].command << "'" << std::endl;
+            folderPatterns[patternCommandPairs[i].folderPath].push_back(static_cast<int>(i));
+        }
+        
+        std::cout << "  Cartelle monitorate: " << folderPatterns.size() << std::endl;
+        for (const auto& folderGroup : folderPatterns) {
+            std::cout << "    Cartella: " << folderGroup.first << " (" << folderGroup.second.size() << " pattern/s)" << std::endl;
+            for (int patternIndex : folderGroup.second) {
+                std::cout << "      Pattern [" << patternCommandPairs[patternIndex].patternName << "]: '" 
+                          << patternCommandPairs[patternIndex].patternRegex 
+                          << "' -> '" << patternCommandPairs[patternIndex].command << "'" << std::endl;
+            }
         }
         
         std::cout << "\nIntervallo controllo file: " << FILE_CHECK_INTERVAL << "ms" << std::endl;
@@ -1405,14 +1608,14 @@ int main(int argc, char* argv[]) {
             std::cerr << "Errore nell'azzeramento del database." << std::endl;
         }
     }
-    // Aggiunge un opzione per verificare quanti file sono stati processati
+    // Opzione per verificare quanti file sono stati processati
     else if (argc > 1 && strcmp(argv[1], "status") == 0) {
         // Carica la configurazione
         LoadConfiguration();
         
         LoadProcessedFiles();
-        std::cout << "PatternTriggerCommand - Stato attuale\n";
-        std::cout << "-----------------------------------\n";
+        std::cout << "PatternTriggerCommand Multi-Folder - Stato attuale\n";
+        std::cout << "--------------------------------------------\n";
         std::cout << "File già processati: " << processedFiles.size() << std::endl;
         
         // Controlla se il servizio è in esecuzione
@@ -1450,15 +1653,29 @@ int main(int argc, char* argv[]) {
         }
         
         // Visualizza la configurazione corrente
-        std::cout << "\nConfigurazione:\n";
+        std::cout << "\nConfigurazione multi-cartella:\n";
         std::cout << "  File di configurazione: " << configFile << std::endl;
-        std::cout << "  Cartella monitorata: " << monitoredFolder << 
-                  (FileExists(monitoredFolder) ? " (OK)" : " (NON ESISTE!)") << std::endl;
-        std::cout << "  Pattern configurati: " << patternCommandPairs.size() << std::endl;
+        std::cout << "  Cartella di default: " << defaultMonitoredFolder << 
+                  (FileExists(defaultMonitoredFolder) ? " (OK)" : " (NON ESISTE!)") << std::endl;
+        
+        // Raggruppa i pattern per cartella
+        std::map<std::string, std::vector<int>> folderPatterns;
         for (size_t i = 0; i < patternCommandPairs.size(); ++i) {
-            std::cout << "    Pattern " << (i+1) << ": '" << patternCommandPairs[i].patternRegex 
-                      << "' -> '" << patternCommandPairs[i].command 
-                      << (FileExists(patternCommandPairs[i].command) ? " (OK)" : " (NON ESISTE!)") << "'" << std::endl;
+            folderPatterns[patternCommandPairs[i].folderPath].push_back(static_cast<int>(i));
+        }
+        
+        std::cout << "  Cartelle monitorate: " << folderPatterns.size() << std::endl;
+        for (const auto& folderGroup : folderPatterns) {
+            std::cout << "    Cartella: " << folderGroup.first << 
+                      (FileExists(folderGroup.first) ? " (OK)" : " (NON ESISTE!)") << 
+                      " - " << folderGroup.second.size() << " pattern/s" << std::endl;
+            
+            for (int patternIndex : folderGroup.second) {
+                std::cout << "      [" << patternCommandPairs[patternIndex].patternName << "] '" 
+                          << patternCommandPairs[patternIndex].patternRegex 
+                          << "' -> '" << patternCommandPairs[patternIndex].command 
+                          << (FileExists(patternCommandPairs[patternIndex].command) ? " (OK)" : " (NON ESISTE!)") << "'" << std::endl;
+            }
         }
         
         // Visualizza ultimi eventi dal log
@@ -1476,63 +1693,77 @@ int main(int argc, char* argv[]) {
             std::cout << logLine << std::endl;
         }
     }
-    // Aggiungiamo un meccanismo per riprocessare un singolo file
-    else if (argc > 2 && strcmp(argv[1], "reprocess") == 0) {
+    // Meccanismo per riprocessare un singolo file (ora richiede anche la cartella)
+    else if (argc > 3 && strcmp(argv[1], "reprocess") == 0) {
         // Carica la configurazione
         LoadConfiguration();
         
-        std::string filename = argv[2];
-        WriteToLog("Richiesta di riprocessare manualmente il file: " + filename);
+        std::string folderPath = argv[2];
+        std::string filename = argv[3];
+        WriteToLog("Richiesta di riprocessare manualmente il file: " + filename + " nella cartella: " + folderPath);
         
         // Controlla se il file esiste
-        std::string fullPath = monitoredFolder + "\\" + filename;
+        std::string fullPath = folderPath + "\\" + filename;
         if (FileExists(fullPath)) {
             // Verifica se è nel database
             LoadProcessedFiles();
-            if (IsFileAlreadyProcessed(filename)) {
+            if (IsFileAlreadyProcessed(fullPath)) {
                 // Rimuovi dal database
-                processedFiles.erase(filename);
+                processedFiles.erase(fullPath);
                 SaveProcessedFiles();
-                WriteToLog("File rimosso dal database dei processati: " + filename);
+                WriteToLog("File rimosso dal database dei processati: " + fullPath);
             }
             
-            // Trova il pattern corrispondente
-            int patternIndex = FindMatchingPattern(filename);
-            if (patternIndex >= 0) {
-                // Eseguiamo il comando
-                WriteToLog("Riprocessamento manuale del file: " + filename);
-                ExecuteCommand(patternCommandPairs[patternIndex].command, fullPath);
-                std::cout << "File riprocessato con successo: " << filename << std::endl;
+            // Trova i pattern corrispondenti
+            std::vector<int> matchingPatterns = FindMatchingPatterns(filename, folderPath);
+            if (!matchingPatterns.empty()) {
+                // Eseguiamo tutti i comandi corrispondenti
+                WriteToLog("Riprocessamento manuale del file: " + fullPath + " con " + 
+                          std::to_string(matchingPatterns.size()) + " pattern/s");
+                
+                for (int patternIndex : matchingPatterns) {
+                    ExecuteCommand(patternCommandPairs[patternIndex].command, fullPath, 
+                                 patternCommandPairs[patternIndex].patternName);
+                }
+                
+                std::cout << "File riprocessato con successo: " << fullPath << 
+                          " (" << matchingPatterns.size() << " pattern/s applicati)" << std::endl;
             } else {
-                WriteToLog("ERRORE: Nessun pattern corrisponde al file: " + filename);
-                std::cerr << "ERRORE: Nessun pattern corrisponde al file. Controlla la configurazione." << std::endl;
+                WriteToLog("ERRORE: Nessun pattern corrisponde al file: " + filename + " nella cartella: " + folderPath);
+                std::cerr << "ERRORE: Nessun pattern corrisponde al file nella cartella specificata. Controlla la configurazione." << std::endl;
             }
         } else {
             WriteToLog("ERRORE: File non trovato per il riprocessamento: " + fullPath);
-            std::cerr << "ERRORE: File non trovato. Verifica che il file esista in " << monitoredFolder << std::endl;
+            std::cerr << "ERRORE: File non trovato. Verifica che il file esista in " << folderPath << std::endl;
         }
     }
     // Opzione per creare/aggiornare la configurazione
     else if (argc > 1 && strcmp(argv[1], "config") == 0 && argc == 2) {
-        WriteToLog("Creazione/aggiornamento configurazione");
+        WriteToLog("Creazione/aggiornamento configurazione multi-cartella");
         
         // Carica la configurazione esistente o crea quella di default
         LoadConfiguration();
         
-        std::cout << "Configurazione attuale:" << std::endl;
+        std::cout << "Configurazione multi-cartella attuale:" << std::endl;
         std::cout << "  File di configurazione: " << configFile << std::endl;
-        std::cout << "  Cartella monitorata: " << monitoredFolder << std::endl;
-        std::cout << "  Pattern configurati: " << patternCommandPairs.size() << std::endl;
+        std::cout << "  Cartella di default: " << defaultMonitoredFolder << std::endl;
+        
+        // Raggruppa i pattern per cartella
+        std::map<std::string, std::vector<int>> folderPatterns;
         for (size_t i = 0; i < patternCommandPairs.size(); ++i) {
-            std::cout << "    Pattern " << (i+1) << ": '" << patternCommandPairs[i].patternRegex 
-                      << "' -> '" << patternCommandPairs[i].command << "'" << std::endl;
+            folderPatterns[patternCommandPairs[i].folderPath].push_back(static_cast<int>(i));
         }
         
-        std::cout << "\nConfigurazione creata/aggiornata con successo." << std::endl;
+        std::cout << "  Cartelle monitorate: " << folderPatterns.size() << std::endl;
+        for (const auto& folderGroup : folderPatterns) {
+            std::cout << "    " << folderGroup.first << " (" << folderGroup.second.size() << " pattern/s)" << std::endl;
+        }
+        
+        std::cout << "\nConfigurazione multi-cartella creata/aggiornata con successo." << std::endl;
     }
     // Altrimenti, avvia il servizio
     else {
-        WriteToLog("Avvio servizio Windows");
+        WriteToLog("Avvio servizio Windows multi-cartella");
         
         SERVICE_TABLE_ENTRY serviceTable[] = {
             { const_cast<LPSTR>(SERVICE_NAME), (LPSERVICE_MAIN_FUNCTION)ServiceMain },
@@ -1544,17 +1775,19 @@ int main(int argc, char* argv[]) {
             DWORD err = GetLastError();
             WriteToLog("StartServiceCtrlDispatcher failed: " + std::to_string(err));
             std::cerr << "Errore: questo programma deve essere eseguito come servizio Windows." << std::endl;
-            std::cerr << "Utilizzare 'PatternTriggerCommand.exe install' per installare il servizio." << std::endl;
-            std::cerr << "Oppure 'PatternTriggerCommand.exe test' per testare in modalità console." << std::endl;
-            std::cerr << "Oppure 'PatternTriggerCommand.exe reset' per resettare il database dei file processati." << std::endl;
-            std::cerr << "Oppure 'PatternTriggerCommand.exe status' per visualizzare lo stato del servizio." << std::endl;
-            std::cerr << "Oppure 'PatternTriggerCommand.exe reprocess nome_file' per riprocessare un file specifico." << std::endl;
-            std::cerr << "Oppure 'PatternTriggerCommand.exe config' per creare/aggiornare la configurazione." << std::endl;
-            std::cerr << "Oppure 'PatternTriggerCommand.exe config percorso_file' per usare un file di configurazione alternativo." << std::endl;
+            std::cerr << "Comandi disponibili per PatternTriggerCommand Multi-Folder:" << std::endl;
+            std::cerr << "  PatternTriggerCommand.exe install     - installa il servizio" << std::endl;
+            std::cerr << "  PatternTriggerCommand.exe uninstall   - disinstalla il servizio" << std::endl;
+            std::cerr << "  PatternTriggerCommand.exe test        - testa in modalità console" << std::endl;
+            std::cerr << "  PatternTriggerCommand.exe status      - visualizza stato del servizio" << std::endl;
+            std::cerr << "  PatternTriggerCommand.exe reset       - resetta database file processati" << std::endl;
+            std::cerr << "  PatternTriggerCommand.exe reprocess <cartella> <file> - riprocessa file specifico" << std::endl;
+            std::cerr << "  PatternTriggerCommand.exe config      - crea/aggiorna configurazione" << std::endl;
+            std::cerr << "  PatternTriggerCommand.exe config <percorso> - usa configurazione alternativa" << std::endl;
             return 1;
         }
     }
     
-    WriteToLog("Applicazione terminata normalmente");
+    WriteToLog("Applicazione multi-cartella terminata normalmente");
     return 0;
 }
