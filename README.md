@@ -8,6 +8,8 @@ PatternTriggerCommand is an advanced Windows service application that monitors m
 
 This latest version introduces a **comprehensive web dashboard** for real-time monitoring, advanced metrics collection, and enhanced system observability, making it a complete enterprise-grade automation solution.
 
+![Screenshot dell'applicazione](screenshot.png)
+
 ### ⚡ Key Features
 
 - **🗂️ Multi-Folder Monitoring**: Native support for monitoring different folders with specific patterns
