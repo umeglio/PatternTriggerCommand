@@ -1531,7 +1531,7 @@ std::string GetSchedulerJson() {
 }
 
 std::string GetSchedulerPageHtml() {
-    return R"(<!DOCTYPE html>
+    return R"html(<!DOCTYPE html>
 <html lang="it">
 <head>
     <meta charset="UTF-8">
@@ -1872,7 +1872,7 @@ std::string GetSchedulerPageHtml() {
         setInterval(loadTasks, 5000);
     </script>
 </body>
-</html>)";
+</html>)html";
 }
 
 std::string GetDashboardHtml() {
