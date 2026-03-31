@@ -1951,472 +1951,166 @@ initDays();loadData();setInterval(loadData,5000);
 }
 
 std::string GetDashboardHtml() {
-    return R"(<!DOCTYPE html>
+    return R"html(<!DOCTYPE html>
 <html lang="it">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PatternTriggerCommand Dashboard</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: #333;
-            min-height: 100vh;
-        }
-        
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        
-        .header {
-            text-align: center;
-            color: white;
-            margin-bottom: 30px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-        }
-        
-        .header h1 {
-            font-size: 2.5em;
-            margin-bottom: 10px;
-        }
-        
-        .header p {
-            font-size: 1.1em;
-            opacity: 0.9;
-        }
-        
-        .dashboard {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }
-        
-        .card {
-            background: rgba(255, 255, 255, 0.95);
-            border-radius: 15px;
-            padding: 25px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            transition: transform 0.3s ease, box-shadow 0.3s ease;
-        }
-        
-        .card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 12px 48px rgba(0, 0, 0, 0.15);
-        }
-        
-        .card h3 {
-            color: #444;
-            margin-bottom: 15px;
-            font-size: 1.2em;
-            border-bottom: 2px solid #667eea;
-            padding-bottom: 8px;
-        }
-        
-        .metric {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin: 10px 0;
-            padding: 8px 0;
-        }
-        
-        .metric-label {
-            font-weight: 500;
-            color: #666;
-        }
-        
-        .metric-value {
-            font-weight: bold;
-            color: #333;
-            background: linear-gradient(45deg, #667eea, #764ba2);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-        
-        .status {
-            display: inline-block;
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            margin-right: 8px;
-        }
-        
-        .status.active {
-            background: #4CAF50;
-            box-shadow: 0 0 10px rgba(76, 175, 80, 0.5);
-        }
-        
-        .status.inactive {
-            background: #f44336;
-        }
-        
-        .activity-list {
-            max-height: 300px;
-            overflow-y: auto;
-            border: 1px solid #eee;
-            border-radius: 8px;
-            padding: 10px;
-        }
-        
-        .activity-item {
-            padding: 8px;
-            border-bottom: 1px solid #f0f0f0;
-            font-size: 0.9em;
-            display: flex;
-            justify-content: space-between;
-        }
-        
-        .activity-item:last-child {
-            border-bottom: none;
-        }
-        
-        .activity-time {
-            color: #888;
-            font-size: 0.8em;
-        }
-        
-        .table-container {
-            background: rgba(255, 255, 255, 0.95);
-            border-radius: 15px;
-            padding: 25px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            margin-bottom: 20px;
-        }
-        
-        .table-container h3 {
-            color: #444;
-            margin-bottom: 15px;
-            font-size: 1.2em;
-            border-bottom: 2px solid #667eea;
-            padding-bottom: 8px;
-        }
-        
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 10px;
-        }
-        
-        th, td {
-            padding: 12px;
-            text-align: left;
-            border-bottom: 1px solid #ddd;
-        }
-        
-        th {
-            background: linear-gradient(45deg, #667eea, #764ba2);
-            color: white;
-            font-weight: 600;
-        }
-        
-        tr:nth-child(even) {
-            background-color: rgba(102, 126, 234, 0.05);
-        }
-        
-        tr:hover {
-            background-color: rgba(102, 126, 234, 0.1);
-        }
-        
-        .refresh-info {
-            text-align: center;
-            color: white;
-            margin-top: 20px;
-            opacity: 0.8;
-        }
-        
-        @media (max-width: 768px) {
-            .container {
-                padding: 10px;
-            }
-            
-            .dashboard {
-                grid-template-columns: 1fr;
-            }
-            
-            .header h1 {
-                font-size: 2em;
-            }
-            
-            .card {
-                padding: 15px;
-            }
-            
-            table {
-                font-size: 0.9em;
-            }
-            
-            th, td {
-                padding: 8px;
-            }
-        }
-        
-        .loading {
-            text-align: center;
-            color: white;
-            font-size: 1.2em;
-            margin: 50px 0;
-        }
-        
-        .error {
-            background: rgba(244, 67, 54, 0.1);
-            border: 1px solid #f44336;
-            color: #d32f2f;
-            padding: 15px;
-            border-radius: 8px;
-            margin: 20px 0;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PTC Dashboard</title>
+<style>
+:root{--bg:#0f172a;--surface:#1e293b;--surface2:#334155;--border:#475569;--primary:#6366f1;--primary-light:#818cf8;--accent:#22d3ee;--success:#22c55e;--warning:#f59e0b;--danger:#ef4444;--text:#f1f5f9;--text2:#94a3b8;--text3:#64748b;--radius:10px;}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;}
+.top-bar{background:var(--surface);border-bottom:1px solid var(--border);padding:12px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50;}
+.top-bar h1{font-size:1.3em;font-weight:700;background:linear-gradient(135deg,var(--primary-light),var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+.top-bar a{color:var(--text2);text-decoration:none;font-size:0.9em;padding:6px 16px;border:1px solid var(--border);border-radius:20px;transition:all 0.2s;}
+.top-bar a:hover{color:var(--text);border-color:var(--primary);}
+.main{max-width:1440px;margin:0 auto;padding:20px;}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:24px;}
+.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 20px;transition:border-color 0.2s;}
+.stat-card:hover{border-color:var(--primary);}
+.stat-label{font-size:0.78em;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;}
+.stat-value{font-size:1.5em;font-weight:700;color:var(--text);}
+.stat-value.on{color:var(--success);}
+.stat-value.off{color:var(--danger);}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:16px;}
+.card-title{font-size:1.1em;font-weight:700;color:var(--text);margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border);}
+table{width:100%;border-collapse:collapse;}
+th{text-align:left;padding:10px 14px;font-size:0.78em;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid var(--border);font-weight:600;}
+td{padding:10px 14px;border-bottom:1px solid rgba(71,85,105,0.3);font-size:0.9em;}
+tr:hover td{background:rgba(99,102,241,0.04);}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:20px;font-size:0.78em;font-weight:600;}
+.badge-on{background:rgba(34,197,94,0.15);color:var(--success);}
+.badge-off{background:rgba(239,68,68,0.15);color:var(--danger);}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;}
+.dot-on{background:var(--success);box-shadow:0 0 6px var(--success);}
+.dot-off{background:var(--danger);}
+.mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:0.85em;color:var(--accent);background:rgba(34,211,238,0.08);padding:2px 8px;border-radius:4px;}
+.activity-list{max-height:320px;overflow-y:auto;}
+.activity-item{padding:8px 0;border-bottom:1px solid rgba(71,85,105,0.2);display:flex;justify-content:space-between;align-items:flex-start;gap:12px;font-size:0.85em;}
+.activity-item:last-child{border-bottom:none;}
+.activity-msg{color:var(--text2);flex:1;word-break:break-word;}
+.activity-time{color:var(--text3);font-size:0.8em;white-space:nowrap;}
+.loading{text-align:center;padding:60px;color:var(--text2);font-size:1.1em;}
+.error-box{background:rgba(239,68,68,0.1);border:1px solid var(--danger);color:var(--danger);padding:16px;border-radius:var(--radius);margin:20px 0;}
+@media(max-width:768px){.main{padding:12px;}.stats{grid-template-columns:1fr 1fr;}.grid2{grid-template-columns:1fr;}th,td{padding:8px 6px;font-size:0.82em;}}
+</style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>🎯 PatternTriggerCommand Dashboard</h1>
-            <p>Monitoring Multi-Folder v3.0 - Autore: Umberto Meglio</p>
-            <p style="margin-top: 10px;"><a href="/scheduler" style="color: rgba(255,255,255,0.9); text-decoration: none; background: rgba(255,255,255,0.2); padding: 8px 20px; border-radius: 20px; font-weight: 600;">Schedulatore</a></p>
+<div class="top-bar">
+    <h1>PTC Dashboard</h1>
+    <a href="/scheduler">Schedulatore</a>
+</div>
+<div class="main">
+    <div id="loading" class="loading">Caricamento dati...</div>
+    <div id="error" class="error-box" style="display:none;"></div>
+    <div id="dashboard" style="display:none;">
+        <div class="stats">
+            <div class="stat-card"><div class="stat-label">File Processati</div><div class="stat-value" id="totalFiles">-</div></div>
+            <div class="stat-card"><div class="stat-label">File Oggi</div><div class="stat-value" id="todayFiles">-</div></div>
+            <div class="stat-card"><div class="stat-label">Comandi Eseguiti</div><div class="stat-value" id="commandsExecuted">-</div></div>
+            <div class="stat-card"><div class="stat-label">Errori</div><div class="stat-value" id="errorsCount">-</div></div>
+            <div class="stat-card"><div class="stat-label">Memoria</div><div class="stat-value" id="memoryUsage">-</div></div>
+            <div class="stat-card"><div class="stat-label">Thread Attivi</div><div class="stat-value" id="activeThreads">-</div></div>
+            <div class="stat-card"><div class="stat-label">Uptime</div><div class="stat-value" id="uptime">-</div></div>
+            <div class="stat-card"><div class="stat-label">Ultima Attivita</div><div class="stat-value" id="lastActivity" style="font-size:0.9em;">-</div></div>
         </div>
-        
-        <div id="loading" class="loading">Caricamento dati...</div>
-        <div id="error" class="error" style="display: none;"></div>
-        
-        <div id="dashboard" style="display: none;">
-            <div class="dashboard">
-                <div class="card">
-                    <h3>📊 Statistiche Generali</h3>
-                    <div class="metric">
-                        <span class="metric-label">File Processati Totali</span>
-                        <span class="metric-value" id="totalFiles">-</span>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-label">File Oggi</span>
-                        <span class="metric-value" id="todayFiles">-</span>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-label">Comandi Eseguiti</span>
-                        <span class="metric-value" id="commandsExecuted">-</span>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-label">Errori</span>
-                        <span class="metric-value" id="errorsCount">-</span>
-                    </div>
-                </div>
-                
-                <div class="card">
-                    <h3>🖥️ Sistema</h3>
-                    <div class="metric">
-                        <span class="metric-label">Memoria Utilizzata</span>
-                        <span class="metric-value" id="memoryUsage">-</span>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-label">Thread Attivi</span>
-                        <span class="metric-value" id="activeThreads">-</span>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-label">Tempo Medio Elaborazione</span>
-                        <span class="metric-value" id="avgProcessing">-</span>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-label">Uptime</span>
-                        <span class="metric-value" id="uptime">-</span>
-                    </div>
-                </div>
-                
-                <div class="card">
-                    <h3>📂 Monitoraggio</h3>
-                    <div class="metric">
-                        <span class="metric-label">Cartelle Monitorate</span>
-                        <span class="metric-value" id="foldersCount">-</span>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-label">Pattern Configurati</span>
-                        <span class="metric-value" id="patternsCount">-</span>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-label">Web Server</span>
-                        <span class="metric-value" id="webServerStatus">-</span>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-label">Schedulatore</span>
-                        <span class="metric-value" id="schedulerStatus">-</span>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-label">Ultima Attività</span>
-                        <span class="metric-value" id="lastActivity">-</span>
-                    </div>
-                </div>
-
-                <div class="card">
-                    <h3>📋 Attività Recente</h3>
-                    <div id="recentActivity" class="activity-list">
-                        Caricamento...
-                    </div>
-                </div>
-            </div>
-            
-            <div class="table-container">
-                <h3>📁 Cartelle Monitorate</h3>
-                <table id="foldersTable">
-                    <thead>
-                        <tr>
-                            <th>Stato</th>
-                            <th>Percorso</th>
-                            <th>File Rilevati</th>
-                            <th>File Processati</th>
-                        </tr>
-                    </thead>
-                    <tbody id="foldersTableBody">
-                    </tbody>
+        <div class="grid2">
+            <div class="card">
+                <div class="card-title">Monitoraggio</div>
+                <table>
+                    <tr><td style="color:var(--text2)">Cartelle Monitorate</td><td style="text-align:right;font-weight:700" id="foldersCount">-</td></tr>
+                    <tr><td style="color:var(--text2)">Pattern Configurati</td><td style="text-align:right;font-weight:700" id="patternsCount">-</td></tr>
+                    <tr><td style="color:var(--text2)">Web Server</td><td style="text-align:right" id="webServerStatus">-</td></tr>
+                    <tr><td style="color:var(--text2)">Schedulatore</td><td style="text-align:right" id="schedulerStatus">-</td></tr>
+                    <tr><td style="color:var(--text2)">Tempo Medio Elaborazione</td><td style="text-align:right;font-weight:700" id="avgProcessing">-</td></tr>
                 </table>
             </div>
-            
-            <div class="table-container">
-                <h3>🎯 Pattern Configurati</h3>
-                <table id="patternsTable">
-                    <thead>
-                        <tr>
-                            <th>Nome</th>
-                            <th>Cartella</th>
-                            <th>Regex</th>
-                            <th>Match</th>
-                            <th>Esecuzioni</th>
-                        </tr>
-                    </thead>
-                    <tbody id="patternsTableBody">
-                    </tbody>
-                </table>
+            <div class="card">
+                <div class="card-title">Attivita Recente</div>
+                <div id="recentActivity" class="activity-list">Caricamento...</div>
             </div>
         </div>
-        
-        <div class="refresh-info">
-            Dashboard aggiornata automaticamente ogni 2 secondi
+        <div class="card">
+            <div class="card-title">Cartelle Monitorate</div>
+            <div style="overflow-x:auto;">
+            <table>
+                <thead><tr><th>Stato</th><th>Percorso</th><th>File Rilevati</th><th>File Processati</th></tr></thead>
+                <tbody id="foldersTableBody"></tbody>
+            </table>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-title">Pattern Configurati</div>
+            <div style="overflow-x:auto;">
+            <table>
+                <thead><tr><th>Nome</th><th>Cartella</th><th>Regex</th><th>Match</th><th>Esecuzioni</th></tr></thead>
+                <tbody id="patternsTableBody"></tbody>
+            </table>
+            </div>
         </div>
     </div>
-    
-    <script>
-        function formatUptime(seconds) {
-            if (seconds < 0) return 'N/A';
-            const days = Math.floor(seconds / 86400);
-            const hours = Math.floor((seconds % 86400) / 3600);
-            const minutes = Math.floor((seconds % 3600) / 60);
-            
-            if (days > 0) return `${days}d ${hours}h ${minutes}m`;
-            if (hours > 0) return `${hours}h ${minutes}m`;
-            return `${minutes}m`;
-        }
-        
-        function formatLastActivity(seconds) {
-            if (seconds < 0) return 'Mai';
-            if (seconds < 60) return `${seconds}s fa`;
-            if (seconds < 3600) return `${Math.floor(seconds / 60)}m fa`;
-            if (seconds < 86400) return `${Math.floor(seconds / 3600)}h fa`;
-            return `${Math.floor(seconds / 86400)}d fa`;
-        }
-        
-        function formatTimestamp(timestamp) {
-            const date = new Date(timestamp * 1000);
-            return date.toLocaleTimeString();
-        }
-        
-        function updateDashboard() {
-            fetch('/api/metrics')
-                .then(response => response.json())
-                .then(data => {
-                    document.getElementById('loading').style.display = 'none';
-                    document.getElementById('error').style.display = 'none';
-                    document.getElementById('dashboard').style.display = 'block';
-                    
-                    // Aggiorna metriche generali
-                    document.getElementById('totalFiles').textContent = data.totalFilesProcessed.toLocaleString();
-                    document.getElementById('todayFiles').textContent = data.filesProcessedToday.toLocaleString();
-                    document.getElementById('commandsExecuted').textContent = data.commandsExecuted.toLocaleString();
-                    document.getElementById('errorsCount').textContent = data.errorsCount.toLocaleString();
-                    
-                    // Aggiorna metriche sistema
-                    document.getElementById('memoryUsage').textContent = data.memoryUsageMB + ' MB';
-                    document.getElementById('activeThreads').textContent = data.activeThreads;
-                    document.getElementById('avgProcessing').textContent = data.averageProcessingTime + ' ms';
-                    document.getElementById('uptime').textContent = formatUptime(data.uptimeSeconds);
-                    
-                    // Aggiorna monitoraggio
-                    document.getElementById('foldersCount').textContent = data.foldersMonitored;
-                    document.getElementById('patternsCount').textContent = data.patternsConfigured;
-                    document.getElementById('webServerStatus').innerHTML = data.webServerRunning ? 
-                        '<span class="status active"></span>Attivo' : 
-                        '<span class="status inactive"></span>Inattivo';
-                    document.getElementById('schedulerStatus').innerHTML = data.schedulerEnabled ?
-                        '<span class="status active"></span>' + data.schedulerTasks + ' task' :
-                        '<span class="status inactive"></span>Disattivo';
-                    document.getElementById('lastActivity').textContent = formatLastActivity(data.lastActivitySeconds);
-
-                    // Aggiorna tabella cartelle
-                    const foldersBody = document.getElementById('foldersTableBody');
-                    foldersBody.innerHTML = '';
-                    data.folders.forEach(folder => {
-                        const row = foldersBody.insertRow();
-                        row.innerHTML = `
-                            <td><span class="status ${folder.active ? 'active' : 'inactive'}"></span>${folder.active ? 'Attivo' : 'Inattivo'}</td>
-                            <td>${folder.path}</td>
-                            <td>${folder.filesDetected}</td>
-                            <td>${folder.filesProcessed}</td>
-                        `;
-                    });
-                    
-                    // Aggiorna tabella pattern
-                    const patternsBody = document.getElementById('patternsTableBody');
-                    patternsBody.innerHTML = '';
-                    data.patterns.forEach(pattern => {
-                        const row = patternsBody.insertRow();
-                        row.innerHTML = `
-                            <td>${pattern.name}</td>
-                            <td>${pattern.folder}</td>
-                            <td><code>${pattern.regex}</code></td>
-                            <td>${pattern.matchCount}</td>
-                            <td>${pattern.executionCount}</td>
-                        `;
-                    });
-                    
-                    // Aggiorna attività recente
-                    const activityDiv = document.getElementById('recentActivity');
-                    activityDiv.innerHTML = '';
-                    data.recentActivity.forEach(activity => {
-                        const div = document.createElement('div');
-                        div.className = 'activity-item';
-                        div.innerHTML = `
-                            <span>${activity.message}</span>
-                            <span class="activity-time">${formatTimestamp(activity.timestamp)}</span>
-                        `;
-                        activityDiv.appendChild(div);
-                    });
-                })
-                .catch(error => {
-                    document.getElementById('loading').style.display = 'none';
-                    document.getElementById('dashboard').style.display = 'none';
-                    const errorDiv = document.getElementById('error');
-                    errorDiv.textContent = 'Errore di connessione: ' + error.message;
-                    errorDiv.style.display = 'block';
-                });
-        }
-        
-        // Aggiorna immediatamente e poi ogni 2 secondi
-        updateDashboard();
-        setInterval(updateDashboard, 2000);
-    </script>
+</div>
+<script>
+function fmtUp(s){if(s<0)return"N/A";var d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60);if(d>0)return d+"g "+h+"h "+m+"m";if(h>0)return h+"h "+m+"m";return m+"m";}
+function fmtAgo(s){if(s<0)return"Mai";if(s<60)return s+"s fa";if(s<3600)return Math.floor(s/60)+"m fa";if(s<86400)return Math.floor(s/3600)+"h fa";return Math.floor(s/86400)+"g fa";}
+function fmtTs(ts){var d=new Date(ts*1000);return d.toLocaleTimeString();}
+function esc(s){if(!s)return"";var d=document.createElement("div");d.appendChild(document.createTextNode(s));return d.innerHTML;}
+function update(){
+    var xhr=new XMLHttpRequest();
+    xhr.open("GET","/api/metrics",true);
+    xhr.onload=function(){
+        if(xhr.status!==200)return;
+        var data=JSON.parse(xhr.responseText);
+        document.getElementById("loading").style.display="none";
+        document.getElementById("error").style.display="none";
+        document.getElementById("dashboard").style.display="block";
+        document.getElementById("totalFiles").textContent=data.totalFilesProcessed;
+        document.getElementById("todayFiles").textContent=data.filesProcessedToday;
+        document.getElementById("commandsExecuted").textContent=data.commandsExecuted;
+        document.getElementById("errorsCount").textContent=data.errorsCount;
+        document.getElementById("memoryUsage").textContent=data.memoryUsageMB+" MB";
+        document.getElementById("activeThreads").textContent=data.activeThreads;
+        document.getElementById("avgProcessing").textContent=data.averageProcessingTime+" ms";
+        document.getElementById("uptime").textContent=fmtUp(data.uptimeSeconds);
+        document.getElementById("lastActivity").textContent=fmtAgo(data.lastActivitySeconds);
+        document.getElementById("foldersCount").textContent=data.foldersMonitored;
+        document.getElementById("patternsCount").textContent=data.patternsConfigured;
+        document.getElementById("webServerStatus").innerHTML=data.webServerRunning?"<span class='badge badge-on'><span class='dot dot-on'></span>Attivo</span>":"<span class='badge badge-off'><span class='dot dot-off'></span>Inattivo</span>";
+        document.getElementById("schedulerStatus").innerHTML=data.schedulerEnabled?"<span class='badge badge-on'><span class='dot dot-on'></span>"+data.schedulerTasks+" task</span>":"<span class='badge badge-off'><span class='dot dot-off'></span>Off</span>";
+        var fb=document.getElementById("foldersTableBody");fb.innerHTML="";
+        data.folders.forEach(function(f){
+            var tr=document.createElement("tr");
+            tr.innerHTML="<td><span class='badge "+(f.active?"badge-on":"badge-off")+"'><span class='dot "+(f.active?"dot-on":"dot-off")+"'></span>"+(f.active?"Attivo":"Off")+"</span></td>"
+                +"<td>"+esc(f.path)+"</td><td>"+f.filesDetected+"</td><td>"+f.filesProcessed+"</td>";
+            fb.appendChild(tr);
+        });
+        var pb=document.getElementById("patternsTableBody");pb.innerHTML="";
+        data.patterns.forEach(function(p){
+            var tr=document.createElement("tr");
+            tr.innerHTML="<td><strong>"+esc(p.name)+"</strong></td><td>"+esc(p.folder)+"</td>"
+                +"<td><span class='mono'>"+esc(p.regex)+"</span></td><td>"+p.matchCount+"</td><td>"+p.executionCount+"</td>";
+            pb.appendChild(tr);
+        });
+        var ad=document.getElementById("recentActivity");ad.innerHTML="";
+        data.recentActivity.forEach(function(a){
+            var div=document.createElement("div");div.className="activity-item";
+            div.innerHTML="<span class='activity-msg'>"+esc(a.message)+"</span><span class='activity-time'>"+fmtTs(a.timestamp)+"</span>";
+            ad.appendChild(div);
+        });
+    };
+    xhr.onerror=function(){
+        document.getElementById("loading").style.display="none";
+        document.getElementById("dashboard").style.display="none";
+        var e=document.getElementById("error");e.textContent="Errore di connessione";e.style.display="block";
+    };
+    xhr.send();
+}
+update();setInterval(update,2000);
+</script>
 </body>
-</html>)";
+</html>)html";
 }
 
 std::string HandleHttpRequest(const std::string& request) {
