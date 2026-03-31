@@ -196,17 +196,29 @@ struct SchedulerTask {
     std::set<int> hours;     // 0-23
     std::set<int> minutes;   // 0-59
     std::string command;
+    int intervalSeconds;     // 0 = usa trigger giorno/ora/minuto, >0 = ripeti ogni N secondi
     int lastFiredMinute;
     int lastFiredHour;
     int lastFiredDayOfYear;
     std::string lastExecutionTime;
     size_t executionCount;
+    std::chrono::steady_clock::time_point lastIntervalRun;
 
-    SchedulerTask() : enabled(true), lastFiredMinute(-1), lastFiredHour(-1),
+    SchedulerTask() : enabled(true), intervalSeconds(0), lastFiredMinute(-1), lastFiredHour(-1),
                       lastFiredDayOfYear(-1), executionCount(0) {}
 };
 
+struct SchedulerExecution {
+    std::string taskName;
+    std::string timestamp;
+    std::string command;
+    int exitCode;
+    bool success;
+};
+
 std::vector<SchedulerTask> schedulerTasks;
+std::vector<SchedulerExecution> schedulerHistory;
+#define MAX_SCHEDULER_HISTORY 200
 std::thread schedulerThread;
 
 // Web Server
@@ -255,7 +267,9 @@ bool LoadSchedulerTasks();
 bool SaveSchedulerTask(const SchedulerTask& task);
 bool DeleteSchedulerTask(const std::string& name);
 void SchedulerWorker();
+void RecordSchedulerExecution(const std::string& taskName, const std::string& command, int exitCode, bool success);
 std::string GetSchedulerJson();
+std::string GetSchedulerScriptsJson();
 std::string GetSchedulerPageHtml();
 std::string ExtractJsonValue(const std::string& json, const std::string& key);
 std::string GetHttpRequestBody(const std::string& request);
@@ -1299,12 +1313,15 @@ bool LoadSchedulerTasks() {
                 }
             } else if (key == "Command") {
                 task.command = value;
+            } else if (key == "Interval") {
+                try { task.intervalSeconds = std::stoi(value); } catch (...) { task.intervalSeconds = 0; }
             }
         }
 
         file.close();
 
         if (!task.name.empty() && !task.command.empty()) {
+            task.lastIntervalRun = std::chrono::steady_clock::now();
             schedulerTasks.push_back(task);
             WriteToLog("Task schedulato caricato: " + task.name, true);
         }
@@ -1364,6 +1381,7 @@ bool SaveSchedulerTask(const SchedulerTask& task) {
     file << "\n";
 
     file << "Command=" << task.command << "\n";
+    file << "Interval=" << task.intervalSeconds << "\n";
     file.close();
 
     WriteToLog("Task schedulato salvato: " + task.name);
@@ -1390,6 +1408,53 @@ bool DeleteSchedulerTask(const std::string& name) {
     return false;
 }
 
+void RecordSchedulerExecution(const std::string& taskName, const std::string& command, int exitCode, bool success) {
+    std::lock_guard<std::mutex> lock(schedulerMutex);
+    SchedulerExecution exec;
+    exec.taskName = taskName;
+    exec.timestamp = GetTimestamp();
+    exec.command = command;
+    exec.exitCode = exitCode;
+    exec.success = success;
+    schedulerHistory.push_back(exec);
+    if (schedulerHistory.size() > MAX_SCHEDULER_HISTORY) {
+        schedulerHistory.erase(schedulerHistory.begin());
+    }
+}
+
+void SchedulerExecuteTask(const std::string& cmd, const std::string& taskName) {
+    STARTUPINFO si;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    ZeroMemory(&pi, sizeof(pi));
+
+    std::string cmdLine = "cmd.exe /C \"" + cmd + "\"";
+
+    if (CreateProcess(NULL, const_cast<LPSTR>(cmdLine.c_str()),
+                     NULL, NULL, FALSE, CREATE_NO_WINDOW,
+                     NULL, NULL, &si, &pi)) {
+        WaitForSingleObject(pi.hProcess, BATCH_TIMEOUT);
+
+        DWORD exitCode = 0;
+        GetExitCodeProcess(pi.hProcess, &exitCode);
+
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+
+        WriteToLog("Schedulatore: Task '" + taskName +
+                 "' completato con codice: " + std::to_string(exitCode));
+        RecordSchedulerExecution(taskName, cmd, static_cast<int>(exitCode), exitCode == 0);
+    } else {
+        DWORD err = GetLastError();
+        WriteToLog("ERRORE Schedulatore: Impossibile eseguire task '" +
+                 taskName + "': " + std::to_string(err));
+        RecordSchedulerExecution(taskName, cmd, static_cast<int>(err), false);
+    }
+}
+
 void SchedulerWorker() {
     WriteToLog("Avvio thread schedulatore");
 
@@ -1405,65 +1470,49 @@ void SchedulerWorker() {
         int currentDay = st.wDayOfWeek;
         int currentHour = st.wHour;
         int currentMinute = st.wMinute;
-        int currentDayOfYear = st.wDay + st.wMonth * 31; // Approssimazione sufficiente
+        int currentDayOfYear = st.wDay + st.wMonth * 31;
+        auto now = std::chrono::steady_clock::now();
 
         {
             std::lock_guard<std::mutex> lock(schedulerMutex);
             for (auto& task : schedulerTasks) {
                 if (!task.enabled) continue;
 
-                // Evita doppia esecuzione nello stesso minuto
-                if (task.lastFiredDayOfYear == currentDayOfYear &&
-                    task.lastFiredHour == currentHour &&
-                    task.lastFiredMinute == currentMinute) {
-                    continue;
+                bool shouldFire = false;
+
+                if (task.intervalSeconds > 0) {
+                    // Modalita' intervallo: ripeti ogni N secondi
+                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - task.lastIntervalRun).count();
+                    if (elapsed >= task.intervalSeconds) {
+                        shouldFire = true;
+                        task.lastIntervalRun = now;
+                    }
+                } else {
+                    // Modalita' trigger giorno/ora/minuto
+                    if (task.lastFiredDayOfYear == currentDayOfYear &&
+                        task.lastFiredHour == currentHour &&
+                        task.lastFiredMinute == currentMinute) {
+                        continue;
+                    }
+
+                    if (task.days.count(currentDay) &&
+                        task.hours.count(currentHour) &&
+                        task.minutes.count(currentMinute)) {
+                        shouldFire = true;
+                        task.lastFiredDayOfYear = currentDayOfYear;
+                        task.lastFiredHour = currentHour;
+                        task.lastFiredMinute = currentMinute;
+                    }
                 }
 
-                // Verifica se il tempo corrente corrisponde ai trigger
-                if (task.days.count(currentDay) &&
-                    task.hours.count(currentHour) &&
-                    task.minutes.count(currentMinute)) {
-
+                if (shouldFire) {
                     WriteToLog("Schedulatore: Esecuzione task '" + task.name + "' - Comando: " + task.command);
-
-                    task.lastFiredDayOfYear = currentDayOfYear;
-                    task.lastFiredHour = currentHour;
-                    task.lastFiredMinute = currentMinute;
                     task.lastExecutionTime = GetTimestamp();
                     task.executionCount++;
 
-                    // Esegui comando in thread separato
                     std::string cmd = task.command;
                     std::string taskName = task.name;
-                    std::thread([cmd, taskName]() {
-                        STARTUPINFO si;
-                        PROCESS_INFORMATION pi;
-                        ZeroMemory(&si, sizeof(si));
-                        si.cb = sizeof(si);
-                        si.dwFlags = STARTF_USESHOWWINDOW;
-                        si.wShowWindow = SW_HIDE;
-                        ZeroMemory(&pi, sizeof(pi));
-
-                        std::string cmdLine = "cmd.exe /C \"" + cmd + "\"";
-
-                        if (CreateProcess(NULL, const_cast<LPSTR>(cmdLine.c_str()),
-                                         NULL, NULL, FALSE, CREATE_NO_WINDOW,
-                                         NULL, NULL, &si, &pi)) {
-                            WaitForSingleObject(pi.hProcess, BATCH_TIMEOUT);
-
-                            DWORD exitCode = 0;
-                            GetExitCodeProcess(pi.hProcess, &exitCode);
-
-                            CloseHandle(pi.hProcess);
-                            CloseHandle(pi.hThread);
-
-                            WriteToLog("Schedulatore: Task '" + taskName +
-                                     "' completato con codice: " + std::to_string(exitCode));
-                        } else {
-                            WriteToLog("ERRORE Schedulatore: Impossibile eseguire task '" +
-                                     taskName + "': " + std::to_string(GetLastError()));
-                        }
-                    }).detach();
+                    std::thread(SchedulerExecuteTask, cmd, taskName).detach();
                 }
             }
         }
@@ -1489,6 +1538,7 @@ std::string GetSchedulerJson() {
         json << "    {\n";
         json << "      \"name\": \"" << EscapeJsonString(task.name) << "\",\n";
         json << "      \"enabled\": " << (task.enabled ? "true" : "false") << ",\n";
+        json << "      \"intervalSeconds\": " << task.intervalSeconds << ",\n";
 
         json << "      \"days\": \"";
         bool innerFirst = true;
@@ -1524,9 +1574,57 @@ std::string GetSchedulerJson() {
         first = false;
     }
 
+    json << "\n  ],\n";
+    json << "  \"history\": [\n";
+
+    first = true;
+    for (int i = static_cast<int>(schedulerHistory.size()) - 1; i >= 0; --i) {
+        const auto& exec = schedulerHistory[i];
+        if (!first) json << ",\n";
+        json << "    {\n";
+        json << "      \"taskName\": \"" << EscapeJsonString(exec.taskName) << "\",\n";
+        json << "      \"timestamp\": \"" << EscapeJsonString(exec.timestamp) << "\",\n";
+        json << "      \"command\": \"" << EscapeJsonString(exec.command) << "\",\n";
+        json << "      \"exitCode\": " << exec.exitCode << ",\n";
+        json << "      \"success\": " << (exec.success ? "true" : "false") << "\n";
+        json << "    }";
+        first = false;
+    }
+
     json << "\n  ]\n";
     json << "}";
 
+    return json.str();
+}
+
+std::string GetSchedulerScriptsJson() {
+    std::ostringstream json;
+    json << "[";
+
+    std::vector<std::string> searchDirs = {"C:\\Scripts", schedulerFolder};
+    bool first = true;
+
+    for (const auto& dir : searchDirs) {
+        if (!DirectoryExists(dir)) continue;
+
+        std::string patterns[] = {"\\*.bat", "\\*.cmd", "\\*.exe", "\\*.ps1"};
+        for (const auto& ext : patterns) {
+            WIN32_FIND_DATA fd;
+            HANDLE hFind = FindFirstFile((dir + ext).c_str(), &fd);
+            if (hFind == INVALID_HANDLE_VALUE) continue;
+
+            do {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                if (!first) json << ",";
+                json << "\"" << EscapeJsonString(dir + "\\" + fd.cFileName) << "\"";
+                first = false;
+            } while (FindNextFile(hFind, &fd));
+
+            FindClose(hFind);
+        }
+    }
+
+    json << "]";
     return json.str();
 }
 
@@ -1534,343 +1632,320 @@ std::string GetSchedulerPageHtml() {
     return R"html(<!DOCTYPE html>
 <html lang="it">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PatternTriggerCommand - Schedulatore</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: #333;
-            min-height: 100vh;
-        }
-        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
-        .header {
-            text-align: center; color: white; margin-bottom: 30px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-        }
-        .header h1 { font-size: 2.2em; margin-bottom: 10px; }
-        .header a { color: rgba(255,255,255,0.9); text-decoration: none; font-size: 1.1em; }
-        .header a:hover { color: white; text-decoration: underline; }
-        .table-container {
-            background: rgba(255, 255, 255, 0.95); border-radius: 15px; padding: 25px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.1); margin-bottom: 20px;
-        }
-        .table-container h3 {
-            color: #444; margin-bottom: 15px; font-size: 1.2em;
-            border-bottom: 2px solid #667eea; padding-bottom: 8px;
-        }
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
-        th {
-            background: linear-gradient(45deg, #667eea, #764ba2);
-            color: white; font-weight: 600;
-        }
-        tr:nth-child(even) { background-color: rgba(102,126,234,0.05); }
-        tr:hover { background-color: rgba(102,126,234,0.1); }
-        .btn {
-            padding: 6px 14px; border: none; border-radius: 6px; cursor: pointer;
-            font-size: 0.85em; font-weight: 600; margin: 2px;
-            transition: transform 0.2s, box-shadow 0.2s;
-        }
-        .btn:hover { transform: translateY(-1px); box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
-        .btn-primary { background: linear-gradient(45deg, #667eea, #764ba2); color: white; }
-        .btn-success { background: #4CAF50; color: white; }
-        .btn-warning { background: #ff9800; color: white; }
-        .btn-danger { background: #f44336; color: white; }
-        .btn-new { padding: 10px 24px; font-size: 1em; margin-bottom: 15px; }
-        .status-badge {
-            display: inline-block; padding: 3px 10px; border-radius: 12px;
-            font-size: 0.85em; font-weight: 600;
-        }
-        .status-active { background: #e8f5e9; color: #2e7d32; }
-        .status-inactive { background: #fbe9e7; color: #c62828; }
-        .overlay {
-            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.6); display: flex; align-items: center;
-            justify-content: center; z-index: 1000;
-        }
-        .form-container {
-            background: white; border-radius: 15px; padding: 30px; width: 90%;
-            max-width: 600px; max-height: 90vh; overflow-y: auto;
-            box-shadow: 0 16px 64px rgba(0,0,0,0.3);
-        }
-        .form-container h3 {
-            color: #444; margin-bottom: 20px; font-size: 1.3em;
-            border-bottom: 2px solid #667eea; padding-bottom: 8px;
-        }
-        .form-group { margin-bottom: 18px; }
-        .form-group label { display: block; font-weight: 600; color: #555; margin-bottom: 6px; }
-        .form-group input[type="text"] {
-            width: 100%; padding: 10px 14px; border: 2px solid #ddd; border-radius: 8px;
-            font-size: 1em; transition: border-color 0.3s;
-        }
-        .form-group input[type="text"]:focus { border-color: #667eea; outline: none; }
-        .days-selector {
-            display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px;
-        }
-        .days-selector label {
-            display: flex; align-items: center; gap: 4px; padding: 8px 12px;
-            background: #f5f5f5; border-radius: 8px; cursor: pointer;
-            font-weight: 500; transition: background 0.2s;
-        }
-        .days-selector label:hover { background: #e8eaf6; }
-        .days-selector input:checked + span {
-            color: #667eea; font-weight: 700;
-        }
-        .days-selector input { display: none; }
-        .days-selector label.checked { background: #e8eaf6; border: 2px solid #667eea; }
-        .form-buttons { display: flex; gap: 10px; margin-top: 24px; justify-content: flex-end; }
-        .info-card {
-            background: rgba(255,255,255,0.95); border-radius: 15px; padding: 20px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.1); margin-bottom: 20px;
-            display: flex; gap: 30px; flex-wrap: wrap;
-        }
-        .info-item { display: flex; flex-direction: column; }
-        .info-label { font-size: 0.85em; color: #888; font-weight: 500; }
-        .info-value { font-size: 1.2em; font-weight: 700; color: #444; }
-        .refresh-info { text-align: center; color: white; margin-top: 20px; opacity: 0.8; }
-        @media (max-width: 768px) {
-            .container { padding: 10px; }
-            .form-container { width: 95%; padding: 20px; }
-            table { font-size: 0.85em; }
-            th, td { padding: 8px 6px; }
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PTC - Schedulatore</title>
+<style>
+:root{--bg:#0f172a;--surface:#1e293b;--surface2:#334155;--border:#475569;--primary:#6366f1;--primary-light:#818cf8;--accent:#22d3ee;--success:#22c55e;--warning:#f59e0b;--danger:#ef4444;--text:#f1f5f9;--text2:#94a3b8;--text3:#64748b;--radius:10px;}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;}
+.top-bar{background:var(--surface);border-bottom:1px solid var(--border);padding:12px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50;backdrop-filter:blur(12px);}
+.top-bar h1{font-size:1.3em;font-weight:700;background:linear-gradient(135deg,var(--primary-light),var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+.top-bar a{color:var(--text2);text-decoration:none;font-size:0.9em;padding:6px 16px;border:1px solid var(--border);border-radius:20px;transition:all 0.2s;}
+.top-bar a:hover{color:var(--text);border-color:var(--primary);}
+.main{max-width:1440px;margin:0 auto;padding:20px;}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:24px;}
+.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 20px;transition:border-color 0.2s;}
+.stat-card:hover{border-color:var(--primary);}
+.stat-label{font-size:0.78em;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;}
+.stat-value{font-size:1.5em;font-weight:700;color:var(--text);}
+.stat-value.on{color:var(--success);}
+.stat-value.off{color:var(--danger);}
+.tabs{display:flex;gap:4px;margin-bottom:20px;background:var(--surface);border-radius:var(--radius);padding:4px;border:1px solid var(--border);}
+.tab{padding:10px 24px;border-radius:8px;cursor:pointer;font-weight:600;font-size:0.9em;color:var(--text2);transition:all 0.2s;border:none;background:transparent;}
+.tab:hover{color:var(--text);}
+.tab.active{background:var(--primary);color:white;}
+.panel{display:none;}
+.panel.active{display:block;}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:16px;}
+.card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;}
+.card-title{font-size:1.1em;font-weight:700;color:var(--text);}
+.btn{padding:8px 18px;border:none;border-radius:8px;cursor:pointer;font-size:0.85em;font-weight:600;transition:all 0.15s;display:inline-flex;align-items:center;gap:6px;}
+.btn:hover{transform:translateY(-1px);filter:brightness(1.1);}
+.btn:active{transform:translateY(0);}
+.btn-primary{background:var(--primary);color:white;}
+.btn-success{background:var(--success);color:white;}
+.btn-warning{background:var(--warning);color:#000;}
+.btn-danger{background:var(--danger);color:white;}
+.btn-ghost{background:transparent;color:var(--text2);border:1px solid var(--border);}
+.btn-ghost:hover{color:var(--text);border-color:var(--text2);}
+.btn-sm{padding:5px 12px;font-size:0.8em;}
+table{width:100%;border-collapse:collapse;}
+th{text-align:left;padding:10px 14px;font-size:0.78em;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid var(--border);font-weight:600;}
+td{padding:10px 14px;border-bottom:1px solid rgba(71,85,105,0.3);font-size:0.9em;vertical-align:middle;}
+tr:hover td{background:rgba(99,102,241,0.04);}
+.badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:0.78em;font-weight:600;}
+.badge-on{background:rgba(34,197,94,0.15);color:var(--success);}
+.badge-off{background:rgba(239,68,68,0.15);color:var(--danger);}
+.badge-interval{background:rgba(34,211,238,0.15);color:var(--accent);}
+.badge-schedule{background:rgba(129,140,248,0.15);color:var(--primary-light);}
+.mono{font-family:'Cascadia Code','Fira Code',monospace;font-size:0.85em;color:var(--accent);background:rgba(34,211,238,0.08);padding:2px 8px;border-radius:4px;}
+.actions{display:flex;gap:4px;flex-wrap:wrap;}
+.overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:100;backdrop-filter:blur(4px);}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:28px;width:92%;max-width:640px;max-height:90vh;overflow-y:auto;}
+.modal h2{font-size:1.2em;margin-bottom:20px;color:var(--text);padding-bottom:12px;border-bottom:1px solid var(--border);}
+.field{margin-bottom:18px;}
+.field label{display:block;font-size:0.85em;font-weight:600;color:var(--text2);margin-bottom:6px;}
+.field input[type=text],.field input[type=number],.field select{width:100%;padding:10px 14px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:0.95em;transition:border-color 0.2s;}
+.field input:focus,.field select:focus{outline:none;border-color:var(--primary);}
+.field select{cursor:pointer;}
+.field .hint{font-size:0.78em;color:var(--text3);margin-top:4px;}
+.days-row{display:flex;gap:6px;flex-wrap:wrap;}
+.day-chip{padding:8px 14px;border-radius:8px;cursor:pointer;font-weight:600;font-size:0.9em;background:var(--bg);border:2px solid var(--border);color:var(--text2);transition:all 0.15s;user-select:none;}
+.day-chip.on{background:rgba(99,102,241,0.2);border-color:var(--primary);color:var(--primary-light);}
+.mode-switch{display:flex;gap:4px;background:var(--bg);border-radius:8px;padding:4px;margin-bottom:12px;}
+.mode-btn{flex:1;padding:10px;border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:0.88em;color:var(--text2);background:transparent;transition:all 0.2s;}
+.mode-btn.active{background:var(--primary);color:white;}
+.mode-section{display:none;}
+.mode-section.active{display:block;}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:24px;padding-top:16px;border-top:1px solid var(--border);}
+.history-filters{display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;}
+.history-filters input,.history-filters select{padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:0.85em;}
+.history-filters input:focus,.history-filters select:focus{outline:none;border-color:var(--primary);}
+.empty-state{text-align:center;padding:40px;color:var(--text3);}
+@media(max-width:768px){.main{padding:12px;}.stats{grid-template-columns:1fr 1fr;}.tabs{flex-wrap:wrap;}.modal{width:96%;padding:20px;}th,td{padding:8px 6px;font-size:0.82em;}.actions{flex-direction:column;}}
+</style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>Schedulatore</h1>
-            <p><a href="/">Torna alla Dashboard</a></p>
-        </div>
-
-        <div class="info-card">
-            <div class="info-item">
-                <span class="info-label">Stato Schedulatore</span>
-                <span class="info-value" id="schedulerStatus">-</span>
+<div class="top-bar">
+    <h1>PTC Schedulatore</h1>
+    <a href="/">Dashboard</a>
+</div>
+<div class="main">
+    <div class="stats">
+        <div class="stat-card"><div class="stat-label">Stato</div><div class="stat-value" id="sStatus">-</div></div>
+        <div class="stat-card"><div class="stat-label">Task Totali</div><div class="stat-value" id="sTotal">-</div></div>
+        <div class="stat-card"><div class="stat-label">Task Attivi</div><div class="stat-value" id="sActive">-</div></div>
+        <div class="stat-card"><div class="stat-label">Esecuzioni Totali</div><div class="stat-value" id="sExecs">-</div></div>
+        <div class="stat-card"><div class="stat-label">Cartella</div><div class="stat-value" id="sFolder" style="font-size:0.7em;word-break:break-all;">-</div></div>
+    </div>
+    <div class="tabs">
+        <button class="tab active" onclick="switchTab('tasks',this)">Task</button>
+        <button class="tab" onclick="switchTab('history',this)">Storico</button>
+    </div>
+    <div id="panel-tasks" class="panel active">
+        <div class="card">
+            <div class="card-header">
+                <span class="card-title">Task Schedulati</span>
+                <button class="btn btn-primary" onclick="openForm()">+ Nuovo Task</button>
             </div>
-            <div class="info-item">
-                <span class="info-label">Task Configurati</span>
-                <span class="info-value" id="taskCount">-</span>
-            </div>
-            <div class="info-item">
-                <span class="info-label">Task Attivi</span>
-                <span class="info-value" id="activeTaskCount">-</span>
-            </div>
-            <div class="info-item">
-                <span class="info-label">Cartella Configurazione</span>
-                <span class="info-value" id="schedulerFolder" style="font-size:0.9em;">-</span>
-            </div>
-        </div>
-
-        <div class="table-container">
-            <h3>Task Schedulati</h3>
-            <button class="btn btn-primary btn-new" onclick="showTaskForm()">+ Nuovo Task</button>
+            <div style="overflow-x:auto;">
             <table>
-                <thead>
-                    <tr>
-                        <th>Nome</th>
-                        <th>Stato</th>
-                        <th>Giorni</th>
-                        <th>Ore</th>
-                        <th>Minuti</th>
-                        <th>Comando</th>
-                        <th>Ultima Esecuzione</th>
-                        <th>Esecuzioni</th>
-                        <th>Azioni</th>
-                    </tr>
-                </thead>
-                <tbody id="tasksTableBody">
-                </tbody>
+                <thead><tr><th>Nome</th><th>Stato</th><th>Tipo</th><th>Programmazione</th><th>Comando</th><th>Ultima Esec.</th><th>#</th><th>Azioni</th></tr></thead>
+                <tbody id="tBody"></tbody>
             </table>
-        </div>
-
-        <div id="taskFormOverlay" class="overlay" style="display:none;">
-            <div class="form-container">
-                <h3 id="formTitle">Nuovo Task</h3>
-                <form id="taskForm" onsubmit="saveTask(event)">
-                    <input type="hidden" id="originalName" value="">
-                    <div class="form-group">
-                        <label>Nome Task</label>
-                        <input type="text" id="taskName" required placeholder="Es: Backup giornaliero">
-                    </div>
-                    <div class="form-group">
-                        <label>Giorni della Settimana</label>
-                        <div class="days-selector" id="daysSelector">
-                            <label onclick="toggleDay(this)"><input type="checkbox" name="day" value="Lu"><span>Lu</span></label>
-                            <label onclick="toggleDay(this)"><input type="checkbox" name="day" value="Ma"><span>Ma</span></label>
-                            <label onclick="toggleDay(this)"><input type="checkbox" name="day" value="Me"><span>Me</span></label>
-                            <label onclick="toggleDay(this)"><input type="checkbox" name="day" value="Gi"><span>Gi</span></label>
-                            <label onclick="toggleDay(this)"><input type="checkbox" name="day" value="Ve"><span>Ve</span></label>
-                            <label onclick="toggleDay(this)"><input type="checkbox" name="day" value="Sa"><span>Sa</span></label>
-                            <label onclick="toggleDay(this)"><input type="checkbox" name="day" value="Do"><span>Do</span></label>
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label>Ore (separare con virgola, es: 1,6,12,18)</label>
-                        <input type="text" id="taskHours" required placeholder="0,6,12,18">
-                    </div>
-                    <div class="form-group">
-                        <label>Minuti (separare con virgola, es: 0,15,30,45)</label>
-                        <input type="text" id="taskMinutes" required placeholder="0,30">
-                    </div>
-                    <div class="form-group">
-                        <label>Comando da Eseguire</label>
-                        <input type="text" id="taskCommand" required placeholder="C:\Scripts\myscript.bat">
-                    </div>
-                    <div class="form-buttons">
-                        <button type="button" class="btn btn-danger" onclick="hideTaskForm()">Annulla</button>
-                        <button type="submit" class="btn btn-primary">Salva Task</button>
-                    </div>
-                </form>
             </div>
-        </div>
-
-        <div class="refresh-info">
-            Aggiornamento automatico ogni 5 secondi
+            <div id="tEmpty" class="empty-state" style="display:none;">Nessun task configurato. Crea il primo!</div>
         </div>
     </div>
-
-    <script>
-        let currentTasks = [];
-
-        function toggleDay(label) {
-            const cb = label.querySelector('input');
-            cb.checked = !cb.checked;
-            label.classList.toggle('checked', cb.checked);
-        }
-
-        function loadTasks() {
-            fetch('/api/scheduler')
-                .then(r => r.json())
-                .then(data => {
-                    currentTasks = data.tasks || [];
-                    document.getElementById('schedulerStatus').textContent = data.enabled ? 'Attivo' : 'Disattivo';
-                    document.getElementById('taskCount').textContent = currentTasks.length;
-                    document.getElementById('activeTaskCount').textContent = currentTasks.filter(t => t.enabled).length;
-                    document.getElementById('schedulerFolder').textContent = data.folder;
-
-                    const tbody = document.getElementById('tasksTableBody');
-                    tbody.innerHTML = '';
-                    currentTasks.forEach(task => {
-                        const row = tbody.insertRow();
-                        row.innerHTML = `
-                            <td><strong>${task.name}</strong></td>
-                            <td><span class="status-badge ${task.enabled ? 'status-active' : 'status-inactive'}">${task.enabled ? 'Attivo' : 'Disattivo'}</span></td>
-                            <td>${task.days || '-'}</td>
-                            <td>${task.hours || '-'}</td>
-                            <td>${task.minutes || '-'}</td>
-                            <td><code>${task.command}</code></td>
-                            <td>${task.lastExecution || 'Mai'}</td>
-                            <td>${task.executionCount}</td>
-                            <td>
-                                <button class="btn ${task.enabled ? 'btn-warning' : 'btn-success'}" onclick="toggleTask('${task.name}')">${task.enabled ? 'Disattiva' : 'Attiva'}</button>
-                                <button class="btn btn-primary" onclick="editTask('${task.name}')">Modifica</button>
-                                <button class="btn btn-danger" onclick="deleteTask('${task.name}')">Elimina</button>
-                            </td>
-                        `;
-                    });
-                })
-                .catch(err => console.error('Errore caricamento:', err));
-        }
-
-        function showTaskForm(task) {
-            document.getElementById('formTitle').textContent = task ? 'Modifica Task' : 'Nuovo Task';
-            document.getElementById('originalName').value = task ? task.name : '';
-            document.getElementById('taskName').value = task ? task.name : '';
-            document.getElementById('taskHours').value = task ? task.hours : '';
-            document.getElementById('taskMinutes').value = task ? task.minutes : '';
-            document.getElementById('taskCommand').value = task ? task.command : '';
-
-            // Reset giorni
-            const dayCheckboxes = document.querySelectorAll('#daysSelector input[name="day"]');
-            const activeDays = task ? task.days.split(',').map(d => d.trim()) : [];
-            dayCheckboxes.forEach(cb => {
-                cb.checked = activeDays.includes(cb.value);
-                cb.parentElement.classList.toggle('checked', cb.checked);
-            });
-
-            document.getElementById('taskFormOverlay').style.display = 'flex';
-        }
-
-        function hideTaskForm() {
-            document.getElementById('taskFormOverlay').style.display = 'none';
-        }
-
-        function saveTask(e) {
-            e.preventDefault();
-
-            const days = [];
-            document.querySelectorAll('#daysSelector input[name="day"]:checked').forEach(cb => {
-                days.push(cb.value);
-            });
-
-            if (days.length === 0) {
-                alert('Seleziona almeno un giorno della settimana');
-                return;
-            }
-
-            const data = {
-                originalName: document.getElementById('originalName').value,
-                name: document.getElementById('taskName').value,
-                days: days.join(','),
-                hours: document.getElementById('taskHours').value,
-                minutes: document.getElementById('taskMinutes').value,
-                command: document.getElementById('taskCommand').value,
-                enabled: 'true'
-            };
-
-            fetch('/api/scheduler/save', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data)
-            })
-            .then(r => r.json())
-            .then(result => {
-                if (result.success) {
-                    hideTaskForm();
-                    loadTasks();
-                } else {
-                    alert('Errore: ' + (result.error || 'Salvataggio fallito'));
-                }
-            })
-            .catch(err => alert('Errore di rete: ' + err.message));
-        }
-
-        function editTask(name) {
-            const task = currentTasks.find(t => t.name === name);
-            if (task) showTaskForm(task);
-        }
-
-        function toggleTask(name) {
-            fetch('/api/scheduler/toggle', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: name })
-            })
-            .then(r => r.json())
-            .then(() => loadTasks())
-            .catch(err => console.error('Errore toggle:', err));
-        }
-
-        function deleteTask(name) {
-            if (!confirm('Eliminare il task "' + name + '"?')) return;
-
-            fetch('/api/scheduler/delete', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: name })
-            })
-            .then(r => r.json())
-            .then(() => loadTasks())
-            .catch(err => console.error('Errore eliminazione:', err));
-        }
-
-        loadTasks();
-        setInterval(loadTasks, 5000);
-    </script>
+    <div id="panel-history" class="panel">
+        <div class="card">
+            <div class="card-header"><span class="card-title">Storico Esecuzioni</span></div>
+            <div class="history-filters">
+                <input type="text" id="hFilter" placeholder="Filtra per nome task..." oninput="renderHistory()">
+                <select id="hStatus" onchange="renderHistory()"><option value="">Tutti</option><option value="ok">Successo</option><option value="fail">Errore</option></select>
+            </div>
+            <div style="overflow-x:auto;">
+            <table>
+                <thead><tr><th>Data/Ora</th><th>Task</th><th>Comando</th><th>Esito</th><th>Codice</th></tr></thead>
+                <tbody id="hBody"></tbody>
+            </table>
+            </div>
+            <div id="hEmpty" class="empty-state" style="display:none;">Nessuna esecuzione registrata.</div>
+        </div>
+    </div>
+</div>
+<div id="formOverlay" class="overlay" style="display:none;" onclick="if(event.target===this)closeForm()">
+    <div class="modal">
+        <h2 id="fTitle">Nuovo Task</h2>
+        <input type="hidden" id="fOrig" value="">
+        <div class="field">
+            <label>Nome Task</label>
+            <input type="text" id="fName" placeholder="Es: Backup giornaliero">
+        </div>
+        <div class="field">
+            <label>Modalita di Schedulazione</label>
+            <div class="mode-switch">
+                <button class="mode-btn active" onclick="setMode('schedule',this)">Giorno/Ora/Minuto</button>
+                <button class="mode-btn" onclick="setMode('interval',this)">Intervallo (ogni N sec)</button>
+            </div>
+        </div>
+        <div id="modeSchedule" class="mode-section active">
+            <div class="field">
+                <label>Giorni della Settimana</label>
+                <div class="days-row" id="fDays"></div>
+            </div>
+            <div class="field">
+                <label>Ore</label>
+                <input type="text" id="fHours" placeholder="Es: 0,6,12,18">
+                <div class="hint">Inserisci le ore separate da virgola (0-23)</div>
+            </div>
+            <div class="field">
+                <label>Minuti</label>
+                <input type="text" id="fMinutes" placeholder="Es: 0,15,30,45">
+                <div class="hint">Inserisci i minuti separati da virgola (0-59)</div>
+            </div>
+        </div>
+        <div id="modeInterval" class="mode-section">
+            <div class="field">
+                <label>Ripeti ogni (secondi)</label>
+                <input type="number" id="fInterval" min="5" value="60" placeholder="60">
+                <div class="hint">Minimo 5 secondi. Es: 60=ogni minuto, 3600=ogni ora</div>
+            </div>
+        </div>
+        <div class="field">
+            <label>Comando da Eseguire</label>
+            <select id="fScriptSelect" onchange="if(this.value)document.getElementById('fCommand').value=this.value">
+                <option value="">-- Seleziona da elenco --</option>
+            </select>
+            <input type="text" id="fCommand" placeholder="C:\Scripts\myscript.bat" style="margin-top:8px;">
+            <div class="hint">Seleziona un file dall'elenco oppure scrivi il percorso manualmente</div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeForm()">Annulla</button>
+            <button class="btn btn-primary" onclick="saveTask()">Salva Task</button>
+        </div>
+    </div>
+</div>
+<script>
+var T=[],H=[],scripts=[];
+var curMode="schedule";
+var DAYS=["Lu","Ma","Me","Gi","Ve","Sa","Do"];
+function switchTab(id,el){document.querySelectorAll(".tab").forEach(function(t){t.classList.remove("active")});el.classList.add("active");document.querySelectorAll(".panel").forEach(function(p){p.classList.remove("active")});document.getElementById("panel-"+id).classList.add("active");}
+function setMode(m,el){curMode=m;document.querySelectorAll(".mode-btn").forEach(function(b){b.classList.remove("active")});el.classList.add("active");document.getElementById("modeSchedule").className=m==="schedule"?"mode-section active":"mode-section";document.getElementById("modeInterval").className=m==="interval"?"mode-section active":"mode-section";}
+function initDays(){var c=document.getElementById("fDays");c.innerHTML="";DAYS.forEach(function(d){var chip=document.createElement("div");chip.className="day-chip";chip.textContent=d;chip.setAttribute("data-day",d);chip.onclick=function(){this.classList.toggle("on")};c.appendChild(chip)});}
+function loadData(){
+    fetch("/api/scheduler").then(function(r){return r.json()}).then(function(data){
+        T=data.tasks||[];H=data.history||[];
+        var el=document.getElementById("sStatus");el.textContent=data.enabled?"Attivo":"Disattivo";el.className="stat-value "+(data.enabled?"on":"off");
+        document.getElementById("sTotal").textContent=T.length;
+        document.getElementById("sActive").textContent=T.filter(function(t){return t.enabled}).length;
+        var totalExec=0;T.forEach(function(t){totalExec+=t.executionCount});document.getElementById("sExecs").textContent=totalExec;
+        document.getElementById("sFolder").textContent=data.folder;
+        renderTasks();renderHistory();
+    }).catch(function(){});
+    fetch("/api/scheduler/scripts").then(function(r){return r.json()}).then(function(data){
+        scripts=data||[];
+        var sel=document.getElementById("fScriptSelect");
+        var curr=sel.value;
+        sel.innerHTML="<option value=''>-- Seleziona da elenco ("+scripts.length+" file) --</option>";
+        scripts.forEach(function(s){var o=document.createElement("option");o.value=s;o.textContent=s;sel.appendChild(o)});
+        if(curr)sel.value=curr;
+    }).catch(function(){});
+}
+function renderTasks(){
+    var tb=document.getElementById("tBody");tb.innerHTML="";
+    document.getElementById("tEmpty").style.display=T.length?"none":"block";
+    T.forEach(function(t){
+        var tr=document.createElement("tr");
+        var isInt=t.intervalSeconds>0;
+        var sched=isInt?("Ogni "+fmtInterval(t.intervalSeconds)):(t.days+" | ore:"+t.hours+" | min:"+t.minutes);
+        var typeB=isInt?"<span class='badge badge-interval'>Intervallo</span>":"<span class='badge badge-schedule'>Programmato</span>";
+        tr.innerHTML="<td><strong>"+esc(t.name)+"</strong></td>"
+            +"<td><span class='badge "+(t.enabled?"badge-on":"badge-off")+"'>"+(t.enabled?"Attivo":"Off")+"</span></td>"
+            +"<td>"+typeB+"</td>"
+            +"<td>"+esc(sched)+"</td>"
+            +"<td><span class='mono'>"+esc(t.command)+"</span></td>"
+            +"<td>"+(t.lastExecution||"<span style='color:var(--text3)'>Mai</span>")+"</td>"
+            +"<td>"+t.executionCount+"</td>"
+            +"<td class='actions'>"
+            +"<button class='btn btn-sm "+(t.enabled?"btn-warning":"btn-success")+"' onclick=\"togTask('"+esc(t.name)+"')\">"+(t.enabled?"Stop":"Avvia")+"</button>"
+            +"<button class='btn btn-sm btn-ghost' onclick=\"editTask('"+esc(t.name)+"')\">Mod</button>"
+            +"<button class='btn btn-sm btn-ghost' onclick=\"dupeTask('"+esc(t.name)+"')\">Dup</button>"
+            +"<button class='btn btn-sm btn-danger' onclick=\"delTask('"+esc(t.name)+"')\">Elim</button>"
+            +"</td>";
+        tb.appendChild(tr);
+    });
+}
+function renderHistory(){
+    var filter=(document.getElementById("hFilter").value||"").toLowerCase();
+    var status=document.getElementById("hStatus").value;
+    var filtered=H.filter(function(e){
+        if(filter&&e.taskName.toLowerCase().indexOf(filter)<0)return false;
+        if(status==="ok"&&!e.success)return false;
+        if(status==="fail"&&e.success)return false;
+        return true;
+    });
+    var tb=document.getElementById("hBody");tb.innerHTML="";
+    document.getElementById("hEmpty").style.display=filtered.length?"none":"block";
+    filtered.forEach(function(e){
+        var tr=document.createElement("tr");
+        tr.innerHTML="<td>"+esc(e.timestamp)+"</td>"
+            +"<td><strong>"+esc(e.taskName)+"</strong></td>"
+            +"<td><span class='mono'>"+esc(e.command)+"</span></td>"
+            +"<td><span class='badge "+(e.success?"badge-on":"badge-off")+"'>"+(e.success?"OK":"Errore")+"</span></td>"
+            +"<td>"+e.exitCode+"</td>";
+        tb.appendChild(tr);
+    });
+}
+function openForm(task){
+    document.getElementById("fTitle").textContent=task?"Modifica Task":"Nuovo Task";
+    document.getElementById("fOrig").value=task?task.name:"";
+    document.getElementById("fName").value=task?task.name:"";
+    document.getElementById("fCommand").value=task?task.command:"";
+    document.getElementById("fScriptSelect").value=task?task.command:"";
+    var isInt=task&&task.intervalSeconds>0;
+    if(isInt){
+        curMode="interval";
+        document.getElementById("fInterval").value=task.intervalSeconds;
+    }else{
+        curMode="schedule";
+        document.getElementById("fHours").value=task?task.hours:"";
+        document.getElementById("fMinutes").value=task?task.minutes:"";
+    }
+    var btns=document.querySelectorAll(".mode-btn");
+    btns[0].className="mode-btn"+(curMode==="schedule"?" active":"");
+    btns[1].className="mode-btn"+(curMode==="interval"?" active":"");
+    document.getElementById("modeSchedule").className=curMode==="schedule"?"mode-section active":"mode-section";
+    document.getElementById("modeInterval").className=curMode==="interval"?"mode-section active":"mode-section";
+    initDays();
+    if(task&&task.days){
+        var ad=task.days.split(",");
+        document.querySelectorAll("#fDays .day-chip").forEach(function(c){if(ad.indexOf(c.getAttribute("data-day"))>=0)c.classList.add("on")});
+    }
+    document.getElementById("formOverlay").style.display="flex";
+}
+function closeForm(){document.getElementById("formOverlay").style.display="none";}
+function saveTask(){
+    var name=document.getElementById("fName").value.trim();
+    var cmd=document.getElementById("fCommand").value.trim();
+    if(!name){alert("Inserisci un nome per il task");return;}
+    if(!cmd){alert("Inserisci un comando da eseguire");return;}
+    var data={originalName:document.getElementById("fOrig").value,name:name,command:cmd,enabled:"true",intervalSeconds:"0"};
+    if(curMode==="interval"){
+        var iv=parseInt(document.getElementById("fInterval").value)||0;
+        if(iv<5){alert("Intervallo minimo: 5 secondi");return;}
+        data.intervalSeconds=String(iv);
+        data.days="";data.hours="";data.minutes="";
+    }else{
+        var days=[];document.querySelectorAll("#fDays .day-chip.on").forEach(function(c){days.push(c.getAttribute("data-day"))});
+        if(!days.length){alert("Seleziona almeno un giorno");return;}
+        data.days=days.join(",");
+        data.hours=document.getElementById("fHours").value;
+        data.minutes=document.getElementById("fMinutes").value;
+        if(!data.hours){alert("Inserisci almeno un'ora");return;}
+        if(!data.minutes){alert("Inserisci almeno un minuto");return;}
+    }
+    apiPost("/api/scheduler/save",data,function(){closeForm();loadData();});
+}
+function editTask(n){var t=T.find(function(x){return x.name===n});if(t)openForm(t);}
+function dupeTask(n){var t=T.find(function(x){return x.name===n});if(t){var c={};for(var k in t)c[k]=t[k];c.name=t.name+" (copia)";openForm(c);document.getElementById("fOrig").value="";}}
+function togTask(n){apiPost("/api/scheduler/toggle",{name:n},function(){loadData()});}
+function delTask(n){if(!confirm("Eliminare il task '"+n+"'?"))return;apiPost("/api/scheduler/delete",{name:n},function(){loadData()});}
+function apiPost(url,data,cb){
+    var xhr=new XMLHttpRequest();xhr.open("POST",url,true);
+    xhr.setRequestHeader("Content-Type","application/json");
+    xhr.onload=function(){
+        if(xhr.status===200){try{var r=JSON.parse(xhr.responseText);if(r.success){if(cb)cb();}else{alert("Errore: "+(r.error||"Operazione fallita"));}}catch(e){alert("Errore risposta server");}}
+        else{alert("Errore HTTP: "+xhr.status);}
+    };
+    xhr.onerror=function(){alert("Errore di rete");};
+    xhr.send(JSON.stringify(data));
+}
+function esc(s){if(!s)return"";var d=document.createElement("div");d.appendChild(document.createTextNode(s));return d.innerHTML;}
+function fmtInterval(s){if(s>=86400)return Math.floor(s/86400)+"g "+Math.floor((s%86400)/3600)+"h";if(s>=3600)return Math.floor(s/3600)+"h "+Math.floor((s%3600)/60)+"m";if(s>=60)return Math.floor(s/60)+"m "+s%60+"s";return s+"s";}
+initDays();loadData();setInterval(loadData,5000);
+</script>
 </body>
 </html>)html";
 }
@@ -2375,6 +2450,16 @@ std::string HandleHttpRequest(const std::string& request) {
         response += "\r\n";
         response += json;
     }
+    else if (request.find("GET /api/scheduler/scripts") != std::string::npos) {
+        std::string json = GetSchedulerScriptsJson();
+        response = "HTTP/1.1 200 OK\r\n";
+        response += "Content-Type: application/json\r\n";
+        response += "Content-Length: " + std::to_string(json.length()) + "\r\n";
+        response += "Cache-Control: no-cache\r\n";
+        response += "Access-Control-Allow-Origin: *\r\n";
+        response += "\r\n";
+        response += json;
+    }
     else if (request.find("GET /api/scheduler") != std::string::npos) {
         std::string json = GetSchedulerJson();
         response = "HTTP/1.1 200 OK\r\n";
@@ -2394,6 +2479,7 @@ std::string HandleHttpRequest(const std::string& request) {
         std::string minutesStr = ExtractJsonValue(body, "minutes");
         std::string command = ExtractJsonValue(body, "command");
         std::string enabledStr = ExtractJsonValue(body, "enabled");
+        std::string intervalStr = ExtractJsonValue(body, "intervalSeconds");
 
         std::string resultJson;
 
@@ -2409,6 +2495,7 @@ std::string HandleHttpRequest(const std::string& request) {
             task.name = name;
             task.enabled = (enabledStr != "false");
             task.command = command;
+            try { task.intervalSeconds = std::stoi(intervalStr); } catch (...) { task.intervalSeconds = 0; }
 
             // Parse days
             std::istringstream dss(daysStr);
