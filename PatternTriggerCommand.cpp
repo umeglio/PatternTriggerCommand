@@ -75,6 +75,8 @@ struct SERVICE_DESCRIPTION_STRUCT {
 #define SERVICE_SHUTDOWN_TIMEOUT 8000
 #define WEB_UPDATE_INTERVAL 2000
 #define METRICS_UPDATE_INTERVAL 5000
+#define SCHEDULER_CHECK_INTERVAL 15000
+#define DEFAULT_SCHEDULER_FOLDER "C:\\PTC\\schedules"
 
 // Variabili globali del servizio
 SERVICE_STATUS serviceStatus;
@@ -88,6 +90,7 @@ std::mutex configMutex;
 std::mutex processedFilesMutex;
 std::mutex metricsMutex;
 std::mutex patternStatsMutex;
+std::mutex schedulerMutex;
 
 // Configurazione
 std::string defaultMonitoredFolder = DEFAULT_MONITORED_FOLDER;
@@ -98,6 +101,8 @@ std::string processedFilesDb = DEFAULT_PROCESSED_FILES_DB;
 bool detailedLogging = true;
 int webServerPort = DEFAULT_WEB_PORT;
 bool webServerEnabled = true;
+std::string schedulerFolder = DEFAULT_SCHEDULER_FOLDER;
+bool schedulerEnabled = true;
 
 // Statistiche pattern (separate dalla struct per evitare problemi di move)
 std::map<std::string, size_t> patternMatchCounts;
@@ -183,6 +188,27 @@ struct FolderMonitor {
 
 std::map<std::string, std::unique_ptr<FolderMonitor>> folderMonitors;
 
+// Schedulatore
+struct SchedulerTask {
+    std::string name;
+    bool enabled;
+    std::set<int> days;      // 0=Do, 1=Lu, 2=Ma, 3=Me, 4=Gi, 5=Ve, 6=Sa
+    std::set<int> hours;     // 0-23
+    std::set<int> minutes;   // 0-59
+    std::string command;
+    int lastFiredMinute;
+    int lastFiredHour;
+    int lastFiredDayOfYear;
+    std::string lastExecutionTime;
+    size_t executionCount;
+
+    SchedulerTask() : enabled(true), lastFiredMinute(-1), lastFiredHour(-1),
+                      lastFiredDayOfYear(-1), executionCount(0) {}
+};
+
+std::vector<SchedulerTask> schedulerTasks;
+std::thread schedulerThread;
+
 // Web Server
 std::thread webServerThread;
 std::atomic<bool> webServerRunning{false};
@@ -220,6 +246,19 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam);
 void WINAPI ServiceCtrlHandler(DWORD ctrlCode);
 void WINAPI ServiceMain(DWORD argc, LPTSTR *argv);
 BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType);
+
+// Scheduler
+std::string SanitizeFilename(const std::string& name);
+int DayNameToNumber(const std::string& dayName);
+std::string DayNumberToName(int dayNum);
+bool LoadSchedulerTasks();
+bool SaveSchedulerTask(const SchedulerTask& task);
+bool DeleteSchedulerTask(const std::string& name);
+void SchedulerWorker();
+std::string GetSchedulerJson();
+std::string GetSchedulerPageHtml();
+std::string ExtractJsonValue(const std::string& json, const std::string& key);
+std::string GetHttpRequestBody(const std::string& request);
 
 // ====== IMPLEMENTAZIONE FUNZIONI ======
 
@@ -463,7 +502,9 @@ bool LoadConfiguration() {
             config << "ProcessedFilesDB=" << processedFilesDb << "\n";
             config << "DetailedLogging=" << (detailedLogging ? "true" : "false") << "\n";
             config << "WebServerPort=" << webServerPort << "\n";
-            config << "WebServerEnabled=" << (webServerEnabled ? "true" : "false") << "\n\n";
+            config << "WebServerEnabled=" << (webServerEnabled ? "true" : "false") << "\n";
+            config << "SchedulerEnabled=" << (schedulerEnabled ? "true" : "false") << "\n";
+            config << "SchedulerFolder=" << schedulerFolder << "\n\n";
             config << "[Patterns]\n";
             config << "Pattern1=C:\\Monitored\\Documents|^doc.*\\..*$|C:\\Scripts\\process_doc.bat\n";
             config << "Pattern2=C:\\Monitored\\Invoices|^invoice.*\\.pdf$|C:\\Scripts\\process_invoice.bat\n";
@@ -531,6 +572,10 @@ bool LoadConfiguration() {
                 webServerPort = std::stoi(value);
             } else if (key == "WebServerEnabled") {
                 webServerEnabled = (value == "true" || value == "1" || value == "yes");
+            } else if (key == "SchedulerEnabled") {
+                schedulerEnabled = (value == "true" || value == "1" || value == "yes");
+            } else if (key == "SchedulerFolder") {
+                schedulerFolder = value;
             }
         } else if (currentSection == "Patterns") {
             std::vector<std::string> parts;
@@ -1046,6 +1091,8 @@ std::string GetSystemMetricsJson() {
     json << "  \"foldersMonitored\": " << folderMonitors.size() << ",\n";
     json << "  \"patternsConfigured\": " << patternCommandPairs.size() << ",\n";
     json << "  \"webServerRunning\": " << (webServerRunning ? "true" : "false") << ",\n";
+    json << "  \"schedulerEnabled\": " << (schedulerEnabled ? "true" : "false") << ",\n";
+    json << "  \"schedulerTasks\": " << schedulerTasks.size() << ",\n";
     json << "  \"folders\": [\n";
     
     bool first = true;
@@ -1095,6 +1142,737 @@ std::string GetSystemMetricsJson() {
     json << "}";
     
     return json.str();
+}
+
+// ====== IMPLEMENTAZIONE SCHEDULATORE ======
+
+std::string SanitizeFilename(const std::string& name) {
+    std::string safe;
+    for (char c : name) {
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-') {
+            safe += c;
+        } else if (c == ' ') {
+            safe += '_';
+        }
+    }
+    return safe.empty() ? "unnamed" : safe;
+}
+
+int DayNameToNumber(const std::string& dayName) {
+    if (dayName == "Do" || dayName == "do" || dayName == "DO") return 0;
+    if (dayName == "Lu" || dayName == "lu" || dayName == "LU") return 1;
+    if (dayName == "Ma" || dayName == "ma" || dayName == "MA") return 2;
+    if (dayName == "Me" || dayName == "me" || dayName == "ME") return 3;
+    if (dayName == "Gi" || dayName == "gi" || dayName == "GI") return 4;
+    if (dayName == "Ve" || dayName == "ve" || dayName == "VE") return 5;
+    if (dayName == "Sa" || dayName == "sa" || dayName == "SA") return 6;
+    return -1;
+}
+
+std::string DayNumberToName(int dayNum) {
+    switch (dayNum) {
+        case 0: return "Do";
+        case 1: return "Lu";
+        case 2: return "Ma";
+        case 3: return "Me";
+        case 4: return "Gi";
+        case 5: return "Ve";
+        case 6: return "Sa";
+        default: return "?";
+    }
+}
+
+std::string GetHttpRequestBody(const std::string& request) {
+    size_t bodyStart = request.find("\r\n\r\n");
+    if (bodyStart == std::string::npos) return "";
+    return request.substr(bodyStart + 4);
+}
+
+std::string ExtractJsonValue(const std::string& json, const std::string& key) {
+    std::string searchKey = "\"" + key + "\"";
+    size_t keyPos = json.find(searchKey);
+    if (keyPos == std::string::npos) return "";
+
+    size_t colonPos = json.find(':', keyPos + searchKey.length());
+    if (colonPos == std::string::npos) return "";
+
+    size_t valueStart = json.find_first_not_of(" \t\n\r", colonPos + 1);
+    if (valueStart == std::string::npos) return "";
+
+    if (json[valueStart] == '"') {
+        std::string result;
+        for (size_t i = valueStart + 1; i < json.length(); ++i) {
+            if (json[i] == '\\' && i + 1 < json.length()) {
+                result += json[i + 1];
+                ++i;
+            } else if (json[i] == '"') {
+                break;
+            } else {
+                result += json[i];
+            }
+        }
+        return result;
+    } else {
+        size_t valueEnd = json.find_first_of(",} \t\n\r", valueStart);
+        if (valueEnd == std::string::npos) return json.substr(valueStart);
+        return json.substr(valueStart, valueEnd - valueStart);
+    }
+}
+
+bool LoadSchedulerTasks() {
+    std::lock_guard<std::mutex> lock(schedulerMutex);
+    schedulerTasks.clear();
+
+    if (!DirectoryExists(schedulerFolder)) {
+        CreateDirectoryRecursive(schedulerFolder);
+        WriteToLog("Creata cartella schedulatore: " + schedulerFolder);
+        return true;
+    }
+
+    WIN32_FIND_DATA findData;
+    std::string searchPath = schedulerFolder + "\\*.sch";
+    HANDLE hFind = FindFirstFile(searchPath.c_str(), &findData);
+
+    if (hFind == INVALID_HANDLE_VALUE) {
+        WriteToLog("Nessun task schedulato trovato in: " + schedulerFolder);
+        return true;
+    }
+
+    do {
+        if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+
+        std::string filePath = schedulerFolder + "\\" + findData.cFileName;
+        std::ifstream file(filePath.c_str());
+        if (!file.is_open()) continue;
+
+        SchedulerTask task;
+        std::string line;
+
+        while (std::getline(file, line)) {
+            if (line.empty() || line[0] == '#') continue;
+
+            size_t eqPos = line.find('=');
+            if (eqPos == std::string::npos) continue;
+
+            std::string key = line.substr(0, eqPos);
+            std::string value = line.substr(eqPos + 1);
+
+            key.erase(0, key.find_first_not_of(" \t"));
+            key.erase(key.find_last_not_of(" \t") + 1);
+            value.erase(0, value.find_first_not_of(" \t"));
+            value.erase(value.find_last_not_of(" \t") + 1);
+
+            if (key == "Name") {
+                task.name = value;
+            } else if (key == "Enabled") {
+                task.enabled = (value == "true" || value == "1");
+            } else if (key == "Days") {
+                std::istringstream ss(value);
+                std::string day;
+                while (std::getline(ss, day, ',')) {
+                    day.erase(0, day.find_first_not_of(" \t"));
+                    day.erase(day.find_last_not_of(" \t") + 1);
+                    int dayNum = DayNameToNumber(day);
+                    if (dayNum >= 0) task.days.insert(dayNum);
+                }
+            } else if (key == "Hours") {
+                std::istringstream ss(value);
+                std::string hour;
+                while (std::getline(ss, hour, ',')) {
+                    hour.erase(0, hour.find_first_not_of(" \t"));
+                    hour.erase(hour.find_last_not_of(" \t") + 1);
+                    try {
+                        int h = std::stoi(hour);
+                        if (h >= 0 && h <= 23) task.hours.insert(h);
+                    } catch (...) {}
+                }
+            } else if (key == "Minutes") {
+                std::istringstream ss(value);
+                std::string minute;
+                while (std::getline(ss, minute, ',')) {
+                    minute.erase(0, minute.find_first_not_of(" \t"));
+                    minute.erase(minute.find_last_not_of(" \t") + 1);
+                    try {
+                        int m = std::stoi(minute);
+                        if (m >= 0 && m <= 59) task.minutes.insert(m);
+                    } catch (...) {}
+                }
+            } else if (key == "Command") {
+                task.command = value;
+            }
+        }
+
+        file.close();
+
+        if (!task.name.empty() && !task.command.empty()) {
+            schedulerTasks.push_back(task);
+            WriteToLog("Task schedulato caricato: " + task.name, true);
+        }
+    } while (FindNextFile(hFind, &findData));
+
+    FindClose(hFind);
+
+    WriteToLog("Task schedulati caricati: " + std::to_string(schedulerTasks.size()));
+    return true;
+}
+
+bool SaveSchedulerTask(const SchedulerTask& task) {
+    if (task.name.empty()) return false;
+
+    if (!DirectoryExists(schedulerFolder)) {
+        CreateDirectoryRecursive(schedulerFolder);
+    }
+
+    std::string filename = SanitizeFilename(task.name) + ".sch";
+    std::string filePath = schedulerFolder + "\\" + filename;
+
+    std::ofstream file(filePath.c_str());
+    if (!file.is_open()) {
+        WriteToLog("ERRORE: Impossibile salvare task schedulato: " + filePath);
+        return false;
+    }
+
+    file << "# PatternTriggerCommand - Task Schedulato\n";
+    file << "Name=" << task.name << "\n";
+    file << "Enabled=" << (task.enabled ? "true" : "false") << "\n";
+
+    file << "Days=";
+    bool first = true;
+    for (int d : task.days) {
+        if (!first) file << ",";
+        file << DayNumberToName(d);
+        first = false;
+    }
+    file << "\n";
+
+    file << "Hours=";
+    first = true;
+    for (int h : task.hours) {
+        if (!first) file << ",";
+        file << h;
+        first = false;
+    }
+    file << "\n";
+
+    file << "Minutes=";
+    first = true;
+    for (int m : task.minutes) {
+        if (!first) file << ",";
+        file << m;
+        first = false;
+    }
+    file << "\n";
+
+    file << "Command=" << task.command << "\n";
+    file.close();
+
+    WriteToLog("Task schedulato salvato: " + task.name);
+    return true;
+}
+
+bool DeleteSchedulerTask(const std::string& name) {
+    // Trova e rimuovi il file .sch corrispondente
+    std::string filename = SanitizeFilename(name) + ".sch";
+    std::string filePath = schedulerFolder + "\\" + filename;
+
+    if (DeleteFile(filePath.c_str())) {
+        std::lock_guard<std::mutex> lock(schedulerMutex);
+        schedulerTasks.erase(
+            std::remove_if(schedulerTasks.begin(), schedulerTasks.end(),
+                [&name](const SchedulerTask& t) { return t.name == name; }),
+            schedulerTasks.end()
+        );
+        WriteToLog("Task schedulato eliminato: " + name);
+        return true;
+    }
+
+    WriteToLog("ERRORE: Impossibile eliminare task: " + name);
+    return false;
+}
+
+void SchedulerWorker() {
+    WriteToLog("Avvio thread schedulatore");
+
+    while (!globalShutdown) {
+        if (!schedulerEnabled) {
+            Sleep(SCHEDULER_CHECK_INTERVAL);
+            continue;
+        }
+
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+
+        int currentDay = st.wDayOfWeek;
+        int currentHour = st.wHour;
+        int currentMinute = st.wMinute;
+        int currentDayOfYear = st.wDay + st.wMonth * 31; // Approssimazione sufficiente
+
+        {
+            std::lock_guard<std::mutex> lock(schedulerMutex);
+            for (auto& task : schedulerTasks) {
+                if (!task.enabled) continue;
+
+                // Evita doppia esecuzione nello stesso minuto
+                if (task.lastFiredDayOfYear == currentDayOfYear &&
+                    task.lastFiredHour == currentHour &&
+                    task.lastFiredMinute == currentMinute) {
+                    continue;
+                }
+
+                // Verifica se il tempo corrente corrisponde ai trigger
+                if (task.days.count(currentDay) &&
+                    task.hours.count(currentHour) &&
+                    task.minutes.count(currentMinute)) {
+
+                    WriteToLog("Schedulatore: Esecuzione task '" + task.name + "' - Comando: " + task.command);
+
+                    task.lastFiredDayOfYear = currentDayOfYear;
+                    task.lastFiredHour = currentHour;
+                    task.lastFiredMinute = currentMinute;
+                    task.lastExecutionTime = GetTimestamp();
+                    task.executionCount++;
+
+                    // Esegui comando in thread separato
+                    std::string cmd = task.command;
+                    std::string taskName = task.name;
+                    std::thread([cmd, taskName]() {
+                        STARTUPINFO si;
+                        PROCESS_INFORMATION pi;
+                        ZeroMemory(&si, sizeof(si));
+                        si.cb = sizeof(si);
+                        si.dwFlags = STARTF_USESHOWWINDOW;
+                        si.wShowWindow = SW_HIDE;
+                        ZeroMemory(&pi, sizeof(pi));
+
+                        std::string cmdLine = "cmd.exe /C \"" + cmd + "\"";
+
+                        if (CreateProcess(NULL, const_cast<LPSTR>(cmdLine.c_str()),
+                                         NULL, NULL, FALSE, CREATE_NO_WINDOW,
+                                         NULL, NULL, &si, &pi)) {
+                            WaitForSingleObject(pi.hProcess, BATCH_TIMEOUT);
+
+                            DWORD exitCode = 0;
+                            GetExitCodeProcess(pi.hProcess, &exitCode);
+
+                            CloseHandle(pi.hProcess);
+                            CloseHandle(pi.hThread);
+
+                            WriteToLog("Schedulatore: Task '" + taskName +
+                                     "' completato con codice: " + std::to_string(exitCode));
+                        } else {
+                            WriteToLog("ERRORE Schedulatore: Impossibile eseguire task '" +
+                                     taskName + "': " + std::to_string(GetLastError()));
+                        }
+                    }).detach();
+                }
+            }
+        }
+
+        Sleep(SCHEDULER_CHECK_INTERVAL);
+    }
+
+    WriteToLog("Thread schedulatore terminato");
+}
+
+std::string GetSchedulerJson() {
+    std::lock_guard<std::mutex> lock(schedulerMutex);
+
+    std::ostringstream json;
+    json << "{\n";
+    json << "  \"enabled\": " << (schedulerEnabled ? "true" : "false") << ",\n";
+    json << "  \"folder\": \"" << EscapeJsonString(schedulerFolder) << "\",\n";
+    json << "  \"tasks\": [\n";
+
+    bool first = true;
+    for (const auto& task : schedulerTasks) {
+        if (!first) json << ",\n";
+        json << "    {\n";
+        json << "      \"name\": \"" << EscapeJsonString(task.name) << "\",\n";
+        json << "      \"enabled\": " << (task.enabled ? "true" : "false") << ",\n";
+
+        json << "      \"days\": \"";
+        bool innerFirst = true;
+        for (int d : task.days) {
+            if (!innerFirst) json << ",";
+            json << DayNumberToName(d);
+            innerFirst = false;
+        }
+        json << "\",\n";
+
+        json << "      \"hours\": \"";
+        innerFirst = true;
+        for (int h : task.hours) {
+            if (!innerFirst) json << ",";
+            json << h;
+            innerFirst = false;
+        }
+        json << "\",\n";
+
+        json << "      \"minutes\": \"";
+        innerFirst = true;
+        for (int m : task.minutes) {
+            if (!innerFirst) json << ",";
+            json << m;
+            innerFirst = false;
+        }
+        json << "\",\n";
+
+        json << "      \"command\": \"" << EscapeJsonString(task.command) << "\",\n";
+        json << "      \"lastExecution\": \"" << EscapeJsonString(task.lastExecutionTime) << "\",\n";
+        json << "      \"executionCount\": " << task.executionCount << "\n";
+        json << "    }";
+        first = false;
+    }
+
+    json << "\n  ]\n";
+    json << "}";
+
+    return json.str();
+}
+
+std::string GetSchedulerPageHtml() {
+    return R"(<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PatternTriggerCommand - Schedulatore</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            min-height: 100vh;
+        }
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+        .header {
+            text-align: center; color: white; margin-bottom: 30px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        .header h1 { font-size: 2.2em; margin-bottom: 10px; }
+        .header a { color: rgba(255,255,255,0.9); text-decoration: none; font-size: 1.1em; }
+        .header a:hover { color: white; text-decoration: underline; }
+        .table-container {
+            background: rgba(255, 255, 255, 0.95); border-radius: 15px; padding: 25px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1); margin-bottom: 20px;
+        }
+        .table-container h3 {
+            color: #444; margin-bottom: 15px; font-size: 1.2em;
+            border-bottom: 2px solid #667eea; padding-bottom: 8px;
+        }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th {
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            color: white; font-weight: 600;
+        }
+        tr:nth-child(even) { background-color: rgba(102,126,234,0.05); }
+        tr:hover { background-color: rgba(102,126,234,0.1); }
+        .btn {
+            padding: 6px 14px; border: none; border-radius: 6px; cursor: pointer;
+            font-size: 0.85em; font-weight: 600; margin: 2px;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .btn:hover { transform: translateY(-1px); box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
+        .btn-primary { background: linear-gradient(45deg, #667eea, #764ba2); color: white; }
+        .btn-success { background: #4CAF50; color: white; }
+        .btn-warning { background: #ff9800; color: white; }
+        .btn-danger { background: #f44336; color: white; }
+        .btn-new { padding: 10px 24px; font-size: 1em; margin-bottom: 15px; }
+        .status-badge {
+            display: inline-block; padding: 3px 10px; border-radius: 12px;
+            font-size: 0.85em; font-weight: 600;
+        }
+        .status-active { background: #e8f5e9; color: #2e7d32; }
+        .status-inactive { background: #fbe9e7; color: #c62828; }
+        .overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.6); display: flex; align-items: center;
+            justify-content: center; z-index: 1000;
+        }
+        .form-container {
+            background: white; border-radius: 15px; padding: 30px; width: 90%;
+            max-width: 600px; max-height: 90vh; overflow-y: auto;
+            box-shadow: 0 16px 64px rgba(0,0,0,0.3);
+        }
+        .form-container h3 {
+            color: #444; margin-bottom: 20px; font-size: 1.3em;
+            border-bottom: 2px solid #667eea; padding-bottom: 8px;
+        }
+        .form-group { margin-bottom: 18px; }
+        .form-group label { display: block; font-weight: 600; color: #555; margin-bottom: 6px; }
+        .form-group input[type="text"] {
+            width: 100%; padding: 10px 14px; border: 2px solid #ddd; border-radius: 8px;
+            font-size: 1em; transition: border-color 0.3s;
+        }
+        .form-group input[type="text"]:focus { border-color: #667eea; outline: none; }
+        .days-selector {
+            display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px;
+        }
+        .days-selector label {
+            display: flex; align-items: center; gap: 4px; padding: 8px 12px;
+            background: #f5f5f5; border-radius: 8px; cursor: pointer;
+            font-weight: 500; transition: background 0.2s;
+        }
+        .days-selector label:hover { background: #e8eaf6; }
+        .days-selector input:checked + span {
+            color: #667eea; font-weight: 700;
+        }
+        .days-selector input { display: none; }
+        .days-selector label.checked { background: #e8eaf6; border: 2px solid #667eea; }
+        .form-buttons { display: flex; gap: 10px; margin-top: 24px; justify-content: flex-end; }
+        .info-card {
+            background: rgba(255,255,255,0.95); border-radius: 15px; padding: 20px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1); margin-bottom: 20px;
+            display: flex; gap: 30px; flex-wrap: wrap;
+        }
+        .info-item { display: flex; flex-direction: column; }
+        .info-label { font-size: 0.85em; color: #888; font-weight: 500; }
+        .info-value { font-size: 1.2em; font-weight: 700; color: #444; }
+        .refresh-info { text-align: center; color: white; margin-top: 20px; opacity: 0.8; }
+        @media (max-width: 768px) {
+            .container { padding: 10px; }
+            .form-container { width: 95%; padding: 20px; }
+            table { font-size: 0.85em; }
+            th, td { padding: 8px 6px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Schedulatore</h1>
+            <p><a href="/">Torna alla Dashboard</a></p>
+        </div>
+
+        <div class="info-card">
+            <div class="info-item">
+                <span class="info-label">Stato Schedulatore</span>
+                <span class="info-value" id="schedulerStatus">-</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Task Configurati</span>
+                <span class="info-value" id="taskCount">-</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Task Attivi</span>
+                <span class="info-value" id="activeTaskCount">-</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Cartella Configurazione</span>
+                <span class="info-value" id="schedulerFolder" style="font-size:0.9em;">-</span>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <h3>Task Schedulati</h3>
+            <button class="btn btn-primary btn-new" onclick="showTaskForm()">+ Nuovo Task</button>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Nome</th>
+                        <th>Stato</th>
+                        <th>Giorni</th>
+                        <th>Ore</th>
+                        <th>Minuti</th>
+                        <th>Comando</th>
+                        <th>Ultima Esecuzione</th>
+                        <th>Esecuzioni</th>
+                        <th>Azioni</th>
+                    </tr>
+                </thead>
+                <tbody id="tasksTableBody">
+                </tbody>
+            </table>
+        </div>
+
+        <div id="taskFormOverlay" class="overlay" style="display:none;">
+            <div class="form-container">
+                <h3 id="formTitle">Nuovo Task</h3>
+                <form id="taskForm" onsubmit="saveTask(event)">
+                    <input type="hidden" id="originalName" value="">
+                    <div class="form-group">
+                        <label>Nome Task</label>
+                        <input type="text" id="taskName" required placeholder="Es: Backup giornaliero">
+                    </div>
+                    <div class="form-group">
+                        <label>Giorni della Settimana</label>
+                        <div class="days-selector" id="daysSelector">
+                            <label onclick="toggleDay(this)"><input type="checkbox" name="day" value="Lu"><span>Lu</span></label>
+                            <label onclick="toggleDay(this)"><input type="checkbox" name="day" value="Ma"><span>Ma</span></label>
+                            <label onclick="toggleDay(this)"><input type="checkbox" name="day" value="Me"><span>Me</span></label>
+                            <label onclick="toggleDay(this)"><input type="checkbox" name="day" value="Gi"><span>Gi</span></label>
+                            <label onclick="toggleDay(this)"><input type="checkbox" name="day" value="Ve"><span>Ve</span></label>
+                            <label onclick="toggleDay(this)"><input type="checkbox" name="day" value="Sa"><span>Sa</span></label>
+                            <label onclick="toggleDay(this)"><input type="checkbox" name="day" value="Do"><span>Do</span></label>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Ore (separare con virgola, es: 1,6,12,18)</label>
+                        <input type="text" id="taskHours" required placeholder="0,6,12,18">
+                    </div>
+                    <div class="form-group">
+                        <label>Minuti (separare con virgola, es: 0,15,30,45)</label>
+                        <input type="text" id="taskMinutes" required placeholder="0,30">
+                    </div>
+                    <div class="form-group">
+                        <label>Comando da Eseguire</label>
+                        <input type="text" id="taskCommand" required placeholder="C:\Scripts\myscript.bat">
+                    </div>
+                    <div class="form-buttons">
+                        <button type="button" class="btn btn-danger" onclick="hideTaskForm()">Annulla</button>
+                        <button type="submit" class="btn btn-primary">Salva Task</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <div class="refresh-info">
+            Aggiornamento automatico ogni 5 secondi
+        </div>
+    </div>
+
+    <script>
+        let currentTasks = [];
+
+        function toggleDay(label) {
+            const cb = label.querySelector('input');
+            cb.checked = !cb.checked;
+            label.classList.toggle('checked', cb.checked);
+        }
+
+        function loadTasks() {
+            fetch('/api/scheduler')
+                .then(r => r.json())
+                .then(data => {
+                    currentTasks = data.tasks || [];
+                    document.getElementById('schedulerStatus').textContent = data.enabled ? 'Attivo' : 'Disattivo';
+                    document.getElementById('taskCount').textContent = currentTasks.length;
+                    document.getElementById('activeTaskCount').textContent = currentTasks.filter(t => t.enabled).length;
+                    document.getElementById('schedulerFolder').textContent = data.folder;
+
+                    const tbody = document.getElementById('tasksTableBody');
+                    tbody.innerHTML = '';
+                    currentTasks.forEach(task => {
+                        const row = tbody.insertRow();
+                        row.innerHTML = `
+                            <td><strong>${task.name}</strong></td>
+                            <td><span class="status-badge ${task.enabled ? 'status-active' : 'status-inactive'}">${task.enabled ? 'Attivo' : 'Disattivo'}</span></td>
+                            <td>${task.days || '-'}</td>
+                            <td>${task.hours || '-'}</td>
+                            <td>${task.minutes || '-'}</td>
+                            <td><code>${task.command}</code></td>
+                            <td>${task.lastExecution || 'Mai'}</td>
+                            <td>${task.executionCount}</td>
+                            <td>
+                                <button class="btn ${task.enabled ? 'btn-warning' : 'btn-success'}" onclick="toggleTask('${task.name}')">${task.enabled ? 'Disattiva' : 'Attiva'}</button>
+                                <button class="btn btn-primary" onclick="editTask('${task.name}')">Modifica</button>
+                                <button class="btn btn-danger" onclick="deleteTask('${task.name}')">Elimina</button>
+                            </td>
+                        `;
+                    });
+                })
+                .catch(err => console.error('Errore caricamento:', err));
+        }
+
+        function showTaskForm(task) {
+            document.getElementById('formTitle').textContent = task ? 'Modifica Task' : 'Nuovo Task';
+            document.getElementById('originalName').value = task ? task.name : '';
+            document.getElementById('taskName').value = task ? task.name : '';
+            document.getElementById('taskHours').value = task ? task.hours : '';
+            document.getElementById('taskMinutes').value = task ? task.minutes : '';
+            document.getElementById('taskCommand').value = task ? task.command : '';
+
+            // Reset giorni
+            const dayCheckboxes = document.querySelectorAll('#daysSelector input[name="day"]');
+            const activeDays = task ? task.days.split(',').map(d => d.trim()) : [];
+            dayCheckboxes.forEach(cb => {
+                cb.checked = activeDays.includes(cb.value);
+                cb.parentElement.classList.toggle('checked', cb.checked);
+            });
+
+            document.getElementById('taskFormOverlay').style.display = 'flex';
+        }
+
+        function hideTaskForm() {
+            document.getElementById('taskFormOverlay').style.display = 'none';
+        }
+
+        function saveTask(e) {
+            e.preventDefault();
+
+            const days = [];
+            document.querySelectorAll('#daysSelector input[name="day"]:checked').forEach(cb => {
+                days.push(cb.value);
+            });
+
+            if (days.length === 0) {
+                alert('Seleziona almeno un giorno della settimana');
+                return;
+            }
+
+            const data = {
+                originalName: document.getElementById('originalName').value,
+                name: document.getElementById('taskName').value,
+                days: days.join(','),
+                hours: document.getElementById('taskHours').value,
+                minutes: document.getElementById('taskMinutes').value,
+                command: document.getElementById('taskCommand').value,
+                enabled: 'true'
+            };
+
+            fetch('/api/scheduler/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            })
+            .then(r => r.json())
+            .then(result => {
+                if (result.success) {
+                    hideTaskForm();
+                    loadTasks();
+                } else {
+                    alert('Errore: ' + (result.error || 'Salvataggio fallito'));
+                }
+            })
+            .catch(err => alert('Errore di rete: ' + err.message));
+        }
+
+        function editTask(name) {
+            const task = currentTasks.find(t => t.name === name);
+            if (task) showTaskForm(task);
+        }
+
+        function toggleTask(name) {
+            fetch('/api/scheduler/toggle', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name })
+            })
+            .then(r => r.json())
+            .then(() => loadTasks())
+            .catch(err => console.error('Errore toggle:', err));
+        }
+
+        function deleteTask(name) {
+            if (!confirm('Eliminare il task "' + name + '"?')) return;
+
+            fetch('/api/scheduler/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name })
+            })
+            .then(r => r.json())
+            .then(() => loadTasks())
+            .catch(err => console.error('Errore eliminazione:', err));
+        }
+
+        loadTasks();
+        setInterval(loadTasks, 5000);
+    </script>
+</body>
+</html>)";
 }
 
 std::string GetDashboardHtml() {
@@ -1334,6 +2112,7 @@ std::string GetDashboardHtml() {
         <div class="header">
             <h1>🎯 PatternTriggerCommand Dashboard</h1>
             <p>Monitoring Multi-Folder v3.0 - Autore: Umberto Meglio</p>
+            <p style="margin-top: 10px;"><a href="/scheduler" style="color: rgba(255,255,255,0.9); text-decoration: none; background: rgba(255,255,255,0.2); padding: 8px 20px; border-radius: 20px; font-weight: 600;">Schedulatore</a></p>
         </div>
         
         <div id="loading" class="loading">Caricamento dati...</div>
@@ -1396,11 +2175,15 @@ std::string GetDashboardHtml() {
                         <span class="metric-value" id="webServerStatus">-</span>
                     </div>
                     <div class="metric">
+                        <span class="metric-label">Schedulatore</span>
+                        <span class="metric-value" id="schedulerStatus">-</span>
+                    </div>
+                    <div class="metric">
                         <span class="metric-label">Ultima Attività</span>
                         <span class="metric-value" id="lastActivity">-</span>
                     </div>
                 </div>
-                
+
                 <div class="card">
                     <h3>📋 Attività Recente</h3>
                     <div id="recentActivity" class="activity-list">
@@ -1499,8 +2282,11 @@ std::string GetDashboardHtml() {
                     document.getElementById('webServerStatus').innerHTML = data.webServerRunning ? 
                         '<span class="status active"></span>Attivo' : 
                         '<span class="status inactive"></span>Inattivo';
+                    document.getElementById('schedulerStatus').innerHTML = data.schedulerEnabled ?
+                        '<span class="status active"></span>' + data.schedulerTasks + ' task' :
+                        '<span class="status inactive"></span>Disattivo';
                     document.getElementById('lastActivity').textContent = formatLastActivity(data.lastActivitySeconds);
-                    
+
                     // Aggiorna tabella cartelle
                     const foldersBody = document.getElementById('foldersTableBody');
                     foldersBody.innerHTML = '';
@@ -1570,6 +2356,15 @@ std::string HandleHttpRequest(const std::string& request) {
         response += "\r\n";
         response += html;
     }
+    else if (request.find("GET /scheduler") != std::string::npos) {
+        std::string html = GetSchedulerPageHtml();
+        response = "HTTP/1.1 200 OK\r\n";
+        response += "Content-Type: text/html; charset=utf-8\r\n";
+        response += "Content-Length: " + std::to_string(html.length()) + "\r\n";
+        response += "Cache-Control: no-cache\r\n";
+        response += "\r\n";
+        response += html;
+    }
     else if (request.find("GET /api/metrics") != std::string::npos) {
         std::string json = GetSystemMetricsJson();
         response = "HTTP/1.1 200 OK\r\n";
@@ -1579,6 +2374,139 @@ std::string HandleHttpRequest(const std::string& request) {
         response += "Access-Control-Allow-Origin: *\r\n";
         response += "\r\n";
         response += json;
+    }
+    else if (request.find("GET /api/scheduler") != std::string::npos) {
+        std::string json = GetSchedulerJson();
+        response = "HTTP/1.1 200 OK\r\n";
+        response += "Content-Type: application/json\r\n";
+        response += "Content-Length: " + std::to_string(json.length()) + "\r\n";
+        response += "Cache-Control: no-cache\r\n";
+        response += "Access-Control-Allow-Origin: *\r\n";
+        response += "\r\n";
+        response += json;
+    }
+    else if (request.find("POST /api/scheduler/save") != std::string::npos) {
+        std::string body = GetHttpRequestBody(request);
+        std::string name = ExtractJsonValue(body, "name");
+        std::string originalName = ExtractJsonValue(body, "originalName");
+        std::string daysStr = ExtractJsonValue(body, "days");
+        std::string hoursStr = ExtractJsonValue(body, "hours");
+        std::string minutesStr = ExtractJsonValue(body, "minutes");
+        std::string command = ExtractJsonValue(body, "command");
+        std::string enabledStr = ExtractJsonValue(body, "enabled");
+
+        std::string resultJson;
+
+        if (name.empty() || command.empty()) {
+            resultJson = "{\"success\": false, \"error\": \"Nome e comando sono obbligatori\"}";
+        } else {
+            // Se il nome originale e' diverso, elimina il vecchio file
+            if (!originalName.empty() && originalName != name) {
+                DeleteSchedulerTask(originalName);
+            }
+
+            SchedulerTask task;
+            task.name = name;
+            task.enabled = (enabledStr != "false");
+            task.command = command;
+
+            // Parse days
+            std::istringstream dss(daysStr);
+            std::string day;
+            while (std::getline(dss, day, ',')) {
+                day.erase(0, day.find_first_not_of(" \t"));
+                day.erase(day.find_last_not_of(" \t") + 1);
+                int d = DayNameToNumber(day);
+                if (d >= 0) task.days.insert(d);
+            }
+
+            // Parse hours
+            std::istringstream hss(hoursStr);
+            std::string hour;
+            while (std::getline(hss, hour, ',')) {
+                hour.erase(0, hour.find_first_not_of(" \t"));
+                hour.erase(hour.find_last_not_of(" \t") + 1);
+                try { int h = std::stoi(hour); if (h >= 0 && h <= 23) task.hours.insert(h); } catch (...) {}
+            }
+
+            // Parse minutes
+            std::istringstream mss(minutesStr);
+            std::string minute;
+            while (std::getline(mss, minute, ',')) {
+                minute.erase(0, minute.find_first_not_of(" \t"));
+                minute.erase(minute.find_last_not_of(" \t") + 1);
+                try { int m = std::stoi(minute); if (m >= 0 && m <= 59) task.minutes.insert(m); } catch (...) {}
+            }
+
+            if (SaveSchedulerTask(task)) {
+                // Ricarica i task dal filesystem
+                LoadSchedulerTasks();
+                resultJson = "{\"success\": true}";
+            } else {
+                resultJson = "{\"success\": false, \"error\": \"Errore salvataggio su disco\"}";
+            }
+        }
+
+        response = "HTTP/1.1 200 OK\r\n";
+        response += "Content-Type: application/json\r\n";
+        response += "Content-Length: " + std::to_string(resultJson.length()) + "\r\n";
+        response += "Cache-Control: no-cache\r\n";
+        response += "Access-Control-Allow-Origin: *\r\n";
+        response += "\r\n";
+        response += resultJson;
+    }
+    else if (request.find("POST /api/scheduler/delete") != std::string::npos) {
+        std::string body = GetHttpRequestBody(request);
+        std::string name = ExtractJsonValue(body, "name");
+
+        std::string resultJson;
+        if (!name.empty() && DeleteSchedulerTask(name)) {
+            resultJson = "{\"success\": true}";
+        } else {
+            resultJson = "{\"success\": false, \"error\": \"Task non trovato\"}";
+        }
+
+        response = "HTTP/1.1 200 OK\r\n";
+        response += "Content-Type: application/json\r\n";
+        response += "Content-Length: " + std::to_string(resultJson.length()) + "\r\n";
+        response += "Cache-Control: no-cache\r\n";
+        response += "Access-Control-Allow-Origin: *\r\n";
+        response += "\r\n";
+        response += resultJson;
+    }
+    else if (request.find("POST /api/scheduler/toggle") != std::string::npos) {
+        std::string body = GetHttpRequestBody(request);
+        std::string name = ExtractJsonValue(body, "name");
+
+        std::string resultJson = "{\"success\": false, \"error\": \"Task non trovato\"}";
+        SchedulerTask taskCopy;
+        bool found = false;
+
+        if (!name.empty()) {
+            {
+                std::lock_guard<std::mutex> lock(schedulerMutex);
+                for (auto& task : schedulerTasks) {
+                    if (task.name == name) {
+                        task.enabled = !task.enabled;
+                        taskCopy = task;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if (found) {
+                SaveSchedulerTask(taskCopy);
+                resultJson = "{\"success\": true, \"enabled\": " + std::string(taskCopy.enabled ? "true" : "false") + "}";
+            }
+        }
+
+        response = "HTTP/1.1 200 OK\r\n";
+        response += "Content-Type: application/json\r\n";
+        response += "Content-Length: " + std::to_string(resultJson.length()) + "\r\n";
+        response += "Cache-Control: no-cache\r\n";
+        response += "Access-Control-Allow-Origin: *\r\n";
+        response += "\r\n";
+        response += resultJson;
     }
     else {
         std::string notFound = "404 Not Found";
@@ -1717,9 +2645,16 @@ DWORD WINAPI ServiceWorkerThread(LPVOID /*lpParam*/) {
     if (webServerEnabled) {
         webServerThread = std::thread(WebServerWorker);
     }
-    
+
+    // Carica e avvia schedulatore
+    LoadSchedulerTasks();
+    if (schedulerEnabled) {
+        schedulerThread = std::thread(SchedulerWorker);
+        WriteToLog("Schedulatore avviato con " + std::to_string(schedulerTasks.size()) + " task");
+    }
+
     StartAllFolderMonitors();
-    
+
     WriteToLog("Servizio in esecuzione, attesa terminazione...");
     if (webServerEnabled) {
         WriteToLog("Dashboard disponibile su: http://localhost:" + std::to_string(webServerPort));
@@ -1781,11 +2716,30 @@ DWORD WINAPI ServiceWorkerThread(LPVOID /*lpParam*/) {
         }
     }
     
-    // 2. Ferma monitor cartelle (TIMEOUT: 3 secondi)
+    // 2. Ferma schedulatore (TIMEOUT: 2 secondi)
+    if (schedulerThread.joinable()) {
+        WriteToLog("Arresto thread schedulatore...");
+        auto schedStartTime = GetTickCount();
+        while (GetTickCount() - schedStartTime < 2000) {
+            Sleep(100);
+            if (!schedulerThread.joinable()) break;
+        }
+        try {
+            if (schedulerThread.joinable()) {
+                schedulerThread.join();
+                WriteToLog("Thread schedulatore arrestato");
+            }
+        } catch (...) {
+            WriteToLog("TIMEOUT schedulatore - detach forzato");
+            schedulerThread.detach();
+        }
+    }
+
+    // 3. Ferma monitor cartelle (TIMEOUT: 3 secondi)
     WriteToLog("Arresto monitor cartelle...");
     StopAllFolderMonitors();
-    
-    // 3. Ferma thread metriche (TIMEOUT: 1 secondo)
+
+    // 4. Ferma thread metriche (TIMEOUT: 1 secondo)
     if (metricsThread.joinable()) {
         WriteToLog("Arresto thread metriche...");
         
@@ -2017,8 +2971,12 @@ int main(int argc, char* argv[]) {
             if (webServerEnabled) {
                 std::cout << "Web server abilitato sulla porta " << webServerPort << std::endl;
                 std::cout << "Dashboard: http://localhost:" << webServerPort << std::endl;
+                std::cout << "Schedulatore: http://localhost:" << webServerPort << "/scheduler" << std::endl;
             }
-            
+            if (schedulerEnabled) {
+                std::cout << "Schedulatore abilitato, cartella: " << schedulerFolder << std::endl;
+            }
+
             std::map<std::string, std::vector<int>> folderPatterns;
             for (size_t i = 0; i < patternCommandPairs.size(); ++i) {
                 folderPatterns[patternCommandPairs[i].folderPath].push_back(static_cast<int>(i));
