@@ -1768,6 +1768,7 @@ std::string GetSchedulerPageHtml() {
                             <td>
                                 <button class="btn ${task.enabled ? 'btn-warning' : 'btn-success'}" onclick="toggleTask('${task.name}')">${task.enabled ? 'Disattiva' : 'Attiva'}</button>
                                 <button class="btn btn-primary" onclick="editTask('${task.name}')">Modifica</button>
+                                <button class="btn btn-primary" style="background:#9c27b0;" onclick="duplicateTask('${task.name}')">Duplica</button>
                                 <button class="btn btn-danger" onclick="deleteTask('${task.name}')">Elimina</button>
                             </td>
                         `;
@@ -1842,6 +1843,17 @@ std::string GetSchedulerPageHtml() {
         function editTask(name) {
             const task = currentTasks.find(t => t.name === name);
             if (task) showTaskForm(task);
+        }
+
+        function duplicateTask(name) {
+            const task = currentTasks.find(t => t.name === name);
+            if (task) {
+                const copy = Object.assign({}, task);
+                copy.name = task.name + " (copia)";
+                copy.originalName = "";
+                showTaskForm(copy);
+                document.getElementById("originalName").value = "";
+            }
         }
 
         function toggleTask(name) {
