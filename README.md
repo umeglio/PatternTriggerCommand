@@ -1,60 +1,81 @@
-# 🚀 PatternTriggerCommand Multi-Folder with Web Dashboard
+# PatternTriggerCommand Multi-Folder v3.0
 
-**Author: Umberto Meglio - Development Support: Claude by Anthropic**
+**Autore: Umberto Meglio - Supporto allo sviluppo: Claude di Anthropic**
 
 ![PatternTriggerCommand Dashboard](screenshot.png)
 
-## 🌟 Overview
+## Panoramica
 
-⚡ PatternTriggerCommand is a next-generation Windows service that monitors multiple folders for files matching regex patterns and automatically executes commands when matches are found. 🤖 The latest version includes a comprehensive web dashboard for real-time monitoring and intelligent system management.
+PatternTriggerCommand e' un servizio Windows che monitora cartelle multiple per file corrispondenti a pattern regex ed esegue automaticamente comandi associati. Include una dashboard web integrata per il monitoraggio in tempo reale e uno **schedulatore parametrico** per l'esecuzione pianificata di comandi.
 
-## 💎 Key Features
+## Funzionalita' Principali
 
-🔬 **Multi-Folder Monitoring**: Native support for monitoring different folders with specific pattern configurations and advanced detection algorithms
+### Monitoraggio Multi-Cartella
+- Monitoraggio nativo di cartelle diverse con configurazioni pattern specifiche
+- Espressioni regolari per identificare i file di interesse
+- Esecuzione automatica di comandi al rilevamento di file corrispondenti
+- Database persistente dei file processati per evitare duplicati
 
-🧠 **Pattern-Based Detection**: Uses cutting-edge regular expressions to identify files of interest with machine-learning-grade matching capabilities
+### Schedulatore Parametrico
+- **Trigger settimanale**: selezione giorni (Lu, Ma, Me, Gi, Ve, Sa, Do)
+- **Trigger orario**: ore specifiche (es: 1,6,12,18)
+- **Trigger al minuto**: minuti specifici (es: 0,15,30,45)
+- **Modalita' intervallo**: ripeti ogni N secondi (minimo 5 sec)
+- Configurazione su filesystem in file `.sch`
+- Pagina web dedicata con CRUD completo
+- Storico esecuzioni con filtri per nome e stato
 
-⚙️ **Automated Command Execution**: Triggers customized commands when matching files are detected, passing complete file paths as parameters with intelligent error recovery
+### Dashboard Web
+- Interfaccia responsive HTML5 con tema chiaro
+- Top bar azzurro Napoli con striscia tricolore
+- Statistiche in tempo reale: file processati, comandi, errori, memoria, uptime
+- Tabelle cartelle monitorate e pattern configurati
+- Feed attivita' recente con timestamp
+- Auto-aggiornamento ogni 2 secondi
 
-🛡️ **File Processing Tracking**: Maintains a persistent database of processed files to prevent redundant processing using enterprise-grade data integrity
+### Pagina Schedulatore
+- Gestione task: crea, modifica, duplica, elimina
+- Toggle attiva/disattiva per ogni task
+- Selettore file: scansiona `C:\Scripts` per `.bat`, `.cmd`, `.exe`, `.ps1`
+- Switch tra modalita' programmata (giorno/ora/minuto) e intervallo (ogni N secondi)
+- Storico esecuzioni con filtro per nome task e stato (successo/errore)
+- Chip interattivi per selezione giorni della settimana
 
-📊 **Real-Time Web Dashboard**: Futuristic HTML5 dashboard with live metrics, system monitoring, and predictive performance analytics
+### REST API
+- `GET /` - Dashboard principale
+- `GET /scheduler` - Pagina gestione schedulatore
+- `GET /api/metrics` - Metriche di sistema in JSON
+- `GET /api/scheduler` - Task schedulati e storico in JSON
+- `GET /api/scheduler/scripts` - Elenco script disponibili
+- `POST /api/scheduler/save` - Salva/modifica task
+- `POST /api/scheduler/delete` - Elimina task
+- `POST /api/scheduler/toggle` - Attiva/disattiva task
 
-🌐 **REST API**: Advanced JSON endpoints for seamless system integration and external monitoring capabilities
+## Quick Start
 
-📡 **Advanced Metrics Collection**: Tracks memory usage, processing times, thread monitoring, and comprehensive performance analytics with AI-ready data formats
-
-🔮 **Detailed Logging**: Comprehensive activity logs with configurable verbosity levels for debugging and predictive maintenance
-
-🎛️ **Multiple Operation Modes**: Can run as Windows service or console test mode with full web interface access and real-time diagnostics
-
-## 🔥 Technical Specifications
-
-⭐ **Platform**: Windows 7/Server 2008 R2 or higher with modern API support and future-ready architecture
-🚀 **Development**: Built in C++ using Windows API with modern C++11 features and performance optimizations
-🧠 **Architecture**: Multi-threaded with asynchronous I/O operations for optimal performance and scalability
-🌐 **Web Interface**: Integrated HTTP server with responsive dashboard design and mobile-first approach
-⚡ **Performance**: Optimized for enterprise environments with real-time metrics collection and predictive analytics
-🛡️ **Security**: Thread-safe operations with robust error handling and advanced recovery systems
-
-## 🎯 Quick Start
-
-### ⚙️ Compilation
+### Compilazione
 ```bash
-# With MinGW in PATH
+# Con MinGW nel PATH
 mingw32-make
 
-# Or specify full path
+# Oppure percorso completo
 G:\mingw32\bin\mingw32-make.exe
 ```
 
-### 🚀 Service Installation
+### Installazione Servizio
 ```bash
 PatternTriggerCommand.exe install
 ```
 
-### 🔧 Basic Configuration
-🤖 The service automatically creates an intelligent configuration file at `C:\PTC\config.ini`:
+### Test in Console
+```bash
+PatternTriggerCommand.exe test
+```
+Apri `http://localhost:8080` per la dashboard e `http://localhost:8080/scheduler` per lo schedulatore.
+
+## Configurazione
+
+Il servizio crea automaticamente il file di configurazione `C:\PTC\config.ini`:
 
 ```ini
 [Settings]
@@ -65,269 +86,156 @@ ProcessedFilesDB=C:\PTC\PatternTriggerCommand_processed.txt
 DetailedLogging=true
 WebServerPort=8080
 WebServerEnabled=true
+SchedulerEnabled=true
+SchedulerFolder=C:\PTC\schedules
 
 [Patterns]
-# Extended format: Folder|Pattern|Command
+# Formato esteso: Cartella|Pattern|Comando
 Pattern1=C:\Invoices\Incoming|^invoice.*\.pdf$|C:\Scripts\process_invoice.bat
 Pattern2=C:\Reports\Monthly|^[0-9]{8}_.*DEMAT.*\.csv$|C:\Scripts\process_demat.bat
 
-# Legacy format: Pattern|Command (uses default folder)
+# Formato legacy: Pattern|Comando (usa cartella default)
 Pattern3=^backup.*\.zip$|C:\Scripts\process_backup.bat
 ```
 
-## 📊 Web Dashboard Features
+### Configurazione Schedulatore
 
-🌐 Access the futuristic dashboard at `http://localhost:8080` to monitor:
+I task schedulati sono file `.sch` nella cartella `C:\PTC\schedules\`:
 
-🔬 **General Statistics**
-- Total files processed across all patterns with trend analysis
-- Files processed today with intelligent daily counters
-- Commands executed with success tracking and performance metrics
-- Error counts and failure analysis with predictive insights
-
-⚡ **System Metrics**
-- Memory usage in megabytes with trend tracking and optimization suggestions
-- Active threads monitoring for performance analysis and bottleneck detection
-- Average processing time per file operation with efficiency scoring
-- System uptime and service availability with reliability metrics
-
-📡 **Folder Monitoring Status**
-- Real-time status of all monitored folders with health indicators
-- Files detected versus successfully processed ratios with efficiency analysis
-- Active monitoring indicators and intelligent health status assessment
-- Pattern-specific performance metrics with optimization recommendations
-
-🧠 **Pattern Analytics**
-- Individual pattern match counts and advanced statistics
-- Execution success rates and comprehensive failure analysis
-- Configuration overview and regex validation with smart suggestions
-- Performance optimization recommendations with AI-driven insights
-
-🔮 **Recent Activity Feed**
-- Real-time event log with precision timestamps
-- Processing notifications and intelligent status updates
-- Error reports with detailed diagnostics and resolution suggestions
-- System alerts and predictive warning messages
-
-## 💻 Command Line Interface
-
-### 🎛️ Service Management
-```bash
-PatternTriggerCommand.exe install     # Register as advanced Windows service
-PatternTriggerCommand.exe uninstall   # Remove service registration cleanly
-PatternTriggerCommand.exe test        # Run in console mode for intelligent testing
-PatternTriggerCommand.exe status      # Display comprehensive status with analytics
-```
-
-### 💾 Database Operations
-```bash
-PatternTriggerCommand.exe reset                      # Clear processed files database intelligently
-PatternTriggerCommand.exe reprocess <folder> <file>  # Force reprocess with smart validation
-```
-
-### ⚙️ Configuration Management
-```bash
-PatternTriggerCommand.exe config      # Create or update configuration with validation
-PatternTriggerCommand.exe config <path> # Use alternative configuration with smart detection
-```
-
-## 🔌 REST API Integration
-
-🌐 The service exposes advanced REST endpoints for future-ready system integration:
-
-```bash
-GET /                    # Main dashboard HTML interface with responsive design
-GET /dashboard           # Alternative dashboard URL with mobile optimization
-GET /api/metrics         # Comprehensive JSON system metrics with AI-ready format
-```
-
-🤖 **Sample API Response Structure:**
-```json
-{
-  "totalFilesProcessed": 1250,
-  "filesProcessedToday": 45,
-  "activeThreads": 4,
-  "memoryUsageMB": 35,
-  "averageProcessingTime": 1200,
-  "commandsExecuted": 1200,
-  "errorsCount": 3,
-  "uptimeSeconds": 86400,
-  "lastActivitySeconds": 120,
-  "foldersMonitored": 3,
-  "patternsConfigured": 5,
-  "webServerRunning": true,
-  "folders": [...],
-  "patterns": [...],
-  "recentActivity": [...]
-}
-```
-
-## 🎯 Pattern Configuration Examples
-
-### 💼 Business Document Processing
 ```ini
-# Invoice processing with intelligent date validation
-Pattern1=C:\Enterprise\Invoices|^(invoice|INV)_[0-9]{4}.*\.pdf$|C:\Scripts\process_invoice.bat
-
-# Bank statement integration with smart parsing
-Pattern2=C:\Enterprise\Banking|^[0-9]{8}_.*DEMAT.*\.csv$|C:\Scripts\import_banking.bat
-
-# Contract management workflow with automated archiving
-Pattern3=C:\Enterprise\Contracts|^contract_.*_signed\.pdf$|C:\Scripts\archive_contract.bat
-
-# Monthly reporting automation with analytics
-Pattern4=C:\Enterprise\Reports|^monthly_report_[0-9]{6}\.xlsx$|C:\Scripts\process_report.bat
+# Esempio: C:\PTC\schedules\Backup_giornaliero.sch
+Name=Backup giornaliero
+Enabled=true
+Days=Lu,Ma,Me,Gi,Ve
+Hours=9,17
+Minutes=0,30
+Command=C:\Scripts\backup.bat
+Interval=0
 ```
 
-### 🛠️ IT Operations and DevOps
+**Modalita' intervallo** (ripeti ogni N secondi):
 ```ini
-# Application log analysis with AI insights
-Pattern1=C:\Logs\Applications|^app_[0-9]{8}_[0-9]{6}\.log$|C:\Scripts\analyze_logs.bat
-
-# Database backup verification with integrity checking
-Pattern2=C:\Backups\Database|^db_backup_.*\.sql\.gz$|C:\Scripts\verify_backup.bat
-
-# Configuration deployment automation with rollback capabilities
-Pattern3=C:\Config\Updates|^config_v[0-9]+\.[0-9]+\.xml$|C:\Scripts\deploy_config.bat
-
-# Performance monitoring data processing with predictive analysis
-Pattern4=C:\Monitoring\Metrics|^metrics_[0-9]{8}\.json$|C:\Scripts\process_metrics.bat
+Name=Health check
+Enabled=true
+Command=C:\Scripts\health_check.bat
+Interval=300
 ```
 
-## 🔄 System Operation Flow
+Quando `Interval` e' > 0, i campi Days/Hours/Minutes vengono ignorati e il task viene eseguito ogni N secondi.
 
-🚀 **Initial Scan Phase**: Service performs intelligent comprehensive scan of all configured folders for existing files with smart detection
+## Interfaccia Web
 
-📡 **Continuous Monitoring**: Real-time filesystem change detection using advanced Windows API notifications for optimal performance
+### Dashboard (`http://localhost:8080`)
 
-🧠 **Pattern Matching Engine**: Files are evaluated against configured regex patterns with machine-learning-grade accuracy specific to their monitored folder
+La dashboard mostra in tempo reale:
 
-🛡️ **Duplicate Prevention**: Robust database checking prevents reprocessing with enterprise-grade persistent tracking and integrity validation
+| Sezione | Contenuto |
+|---------|-----------|
+| Stat Cards | File processati, file oggi, comandi eseguiti, errori, memoria, thread, uptime, ultima attivita' |
+| Monitoraggio | Cartelle monitorate, pattern configurati, stato web server e schedulatore |
+| Attivita' Recente | Feed eventi con timestamp |
+| Cartelle | Tabella con stato, percorso, file rilevati/processati |
+| Pattern | Tabella con nome, cartella, regex, match, esecuzioni |
 
-⚙️ **Command Execution**: Matched files trigger associated script execution with intelligent timeout management and advanced error handling
+### Schedulatore (`http://localhost:8080/scheduler`)
 
-📊 **Metrics Collection**: System continuously tracks performance statistics with AI-ready data formats, memory usage, and processing times
+| Sezione | Contenuto |
+|---------|-----------|
+| Stat Cards | Stato schedulatore, task totali, task attivi, esecuzioni totali |
+| Tab Task | Tabella task con nome, stato, tipo (programmato/intervallo), programmazione, comando, azioni |
+| Tab Storico | Log esecuzioni con data/ora, task, comando, esito, codice uscita |
+| Form Modifica | Nome, modalita' (giorno-ora-minuto o intervallo), selezione giorni, ore, minuti, selettore file |
 
-🌐 **Web Dashboard Updates**: Live dashboard updates every 2 seconds with real-time system status and predictive activity analysis
+**Azioni disponibili per ogni task:**
+- **Avvia/Stop** - attiva o disattiva il task
+- **Mod** - apri form di modifica
+- **Dup** - duplica il task con nome "(copia)"
+- **Elim** - elimina il task (con conferma)
 
-## 🛡️ Error Handling and Recovery
+## Comandi CLI
 
-🔒 **File Lock Management**: Intelligent waiting system for files to become available with smart retry algorithms before processing attempts
-
-⏱️ **Command Timeout Protection**: Automatic process termination for commands exceeding configured timeout limits with graceful recovery
-
-🔄 **Graceful Recovery**: Service handles unexpected interruptions without data loss using advanced persistent state management
-
-🧵 **Thread Safety**: All operations use sophisticated mutex synchronization for safe concurrent access with deadlock prevention
-
-📝 **Comprehensive Logging**: Multi-level intelligent logging system helps identify and resolve issues with predictive maintenance insights
-
-🧠 **Resource Management**: Automatic cleanup of resources and memory with intelligent periodic maintenance routines and optimization
-
-## 🔍 Troubleshooting Guide
-
-### 🚨 Service Startup Issues
-🔧 Verify log folder permissions and available disk space with intelligent diagnostics
-⚙️ Check configuration file syntax and validate regex patterns with smart error detection
-🛡️ Ensure all monitored folders exist and are accessible by service account with security validation
-
-### 🐛 File Processing Problems
-🎯 Test regex patterns using online validation tools for accuracy with smart suggestions
-📊 Monitor file detection activity through web dashboard real-time feed with advanced analytics
-🔑 Verify script execution permissions and validate file paths with intelligent path resolution
-
-### 🌐 Web Dashboard Access Issues
-✅ Confirm WebServerEnabled=true setting in configuration file with smart validation
-🔥 Check that WebServerPort is not blocked by Windows firewall with automatic detection
-⚡ Ensure configured port is not already in use by other applications with conflict resolution
-
-### 🚀 Performance Optimization
-📈 Monitor memory usage and processing times through dashboard with predictive insights
-🧵 Review active thread count and optimize pattern complexity with AI-driven recommendations
-📊 Analyze error rates and adjust timeout settings with intelligent auto-tuning capabilities
-
-## 🏗️ Build and Development
-
-### ⚙️ Available Make Targets
 ```bash
-mingw32-make            # Compile the complete project with optimizations
-mingw32-make install    # Compile and install as Windows service with validation
-mingw32-make test       # Compile and run in console test mode with diagnostics
-mingw32-make status     # Check current service status with detailed analytics
-mingw32-make clean      # Clean all compiled files with intelligent cleanup
-mingw32-make reset      # Reset processed files database with integrity check
-mingw32-make uninstall  # Uninstall Windows service with complete cleanup
-mingw32-make config     # Create or update configuration with smart validation
+PatternTriggerCommand.exe install              # Installa come servizio Windows
+PatternTriggerCommand.exe uninstall            # Rimuovi servizio
+PatternTriggerCommand.exe test                 # Modalita' console (CTRL+C per uscire)
+PatternTriggerCommand.exe status               # Stato servizio e configurazione
+PatternTriggerCommand.exe reset                # Reset database file processati
+PatternTriggerCommand.exe config               # Crea/aggiorna configurazione
+PatternTriggerCommand.exe reprocess <dir> <f>  # Riprocessa un file specifico
 ```
 
-## 🏛️ Technical Architecture
+## Make Targets
 
-🎛️ **Service Manager**: Handles Windows service lifecycle with enhanced shutdown procedures and intelligent state management
+```bash
+mingw32-make            # Compila il progetto
+mingw32-make debug      # Compila versione debug
+mingw32-make release    # Compila versione release ottimizzata
+mingw32-make install    # Compila e installa servizio
+mingw32-make test       # Compila e avvia in console
+mingw32-make status     # Verifica stato servizio
+mingw32-make clean      # Pulisci file compilati
+mingw32-make reset      # Reset database
+mingw32-make setup      # Setup completo ambiente
+mingw32-make deploy     # Deploy per produzione
+```
 
-👁️ **Directory Monitor**: Asynchronous multi-folder filesystem monitoring with event-driven architecture and smart filtering
+## Esempi Pattern
 
-🧠 **Pattern Engine**: Optimized regex engine with performance tracking, compilation caching, and machine-learning-ready optimization
+### Documenti Aziendali
+```ini
+Pattern1=C:\Fatture|^(invoice|INV)_[0-9]{4}.*\.pdf$|C:\Scripts\process_invoice.bat
+Pattern2=C:\Banca|^[0-9]{8}_.*DEMAT.*\.csv$|C:\Scripts\import_banking.bat
+Pattern3=C:\Contratti|^contract_.*_signed\.pdf$|C:\Scripts\archive_contract.bat
+```
 
-⚡ **Command Executor**: Secure process execution with timeout management, resource control, and intelligent error recovery
+### Operazioni IT
+```ini
+Pattern1=C:\Logs|^app_[0-9]{8}_[0-9]{6}\.log$|C:\Scripts\analyze_logs.bat
+Pattern2=C:\Backups|^db_backup_.*\.sql\.gz$|C:\Scripts\verify_backup.bat
+Pattern3=C:\Config|^config_v[0-9]+\.[0-9]+\.xml$|C:\Scripts\deploy_config.bat
+```
 
-💾 **Persistence Layer**: Thread-safe processed files database with atomic operations and enterprise-grade data integrity
+## Architettura Tecnica
 
-🌐 **Web Server**: Integrated HTTP server with REST API, responsive dashboard interface, and future-ready protocols
+- **Linguaggio**: C++11 con MinGW
+- **Piattaforma**: Windows 7+ / Server 2008 R2+
+- **Thread**: Multi-thread con mutex per thread safety
+- **Web Server**: HTTP integrato con socket Windows (Winsock2)
+- **Monitoraggio**: `ReadDirectoryChangesW` asincrono per ogni cartella
+- **Schedulatore**: Thread dedicato con check ogni 15 secondi (sleep frazionato per shutdown rapido)
+- **Librerie**: advapi32, kernel32, user32, ws2_32, psapi (incluse in Windows)
+- **Build**: Makefile con MinGW, linking statico per portabilita'
 
-📊 **Metrics Engine**: Real-time performance analytics with historical data collection and predictive insights
+## Struttura Directory
 
-## 🚀 Performance Optimizations
+```
+C:\PTC\
+  config.ini                           # Configurazione principale
+  PatternTriggerCommand.log            # Log attivita'
+  PatternTriggerCommand_detailed.log   # Log dettagliato
+  PatternTriggerCommand_processed.txt  # Database file processati
+  schedules\                           # Task schedulati
+    Backup_giornaliero.sch
+    Health_check.sch
+    ...
 
-🔄 **Asynchronous I/O Operations**: Non-blocking directory monitoring for maximum efficiency with intelligent resource management
+C:\Scripts\                            # Script eseguibili
+  process_invoice.bat
+  backup.bat
+  ...
+```
 
-🎯 **Intelligent Pattern Pooling**: Grouping patterns by folder reduces processing overhead with smart optimization algorithms
+## Requisiti di Sistema
 
-🧠 **Memory Management**: Optimized caching strategies with automatic cleanup routines and predictive resource allocation
+- **OS**: Windows 7/Server 2008 R2 o superiore
+- **Compilatore**: MinGW con supporto C++11
+- **Permessi**: Amministratore per installazione servizio
+- **Rete**: Porta configurabile (default 8080) per dashboard web
 
-✅ **Graceful Shutdown**: Fast service termination with aggressive 5-second timeout and intelligent state preservation
+## Licenza
 
-🧵 **Thread Synchronization**: Efficient mutex-protected operations for concurrent access safety with deadlock prevention
-
-📈 **Metrics Caching**: Smart data collection and serving for responsive dashboard updates with predictive preloading
-
-## 🏢 Enterprise Use Cases
-
-💼 **Business Process Automation**
-🤖 Automated invoice processing and approval workflows with intelligent validation
-📁 Document management systems with version control and smart archiving
-💰 Financial data integration with ERP systems and real-time synchronization
-📊 Automated report generation and distribution with predictive scheduling
-
-🛠️ **IT Operations Management**
-📝 System log file processing and analysis with AI-powered insights
-💾 Automated backup verification and reporting with integrity validation
-⚙️ Configuration management and deployment with rollback capabilities
-📡 Performance monitoring data collection with predictive maintenance
-
-🔗 **System Integration**
-🏭 Legacy system file-based interfaces with intelligent protocol translation
-🔄 Data pipeline triggers and processing with smart orchestration
-⚡ Workflow automation between disparate systems with adaptive routing
-🌐 Real-time data synchronization processes with conflict resolution
-
-## 💻 System Requirements
-
-🖥️ **Operating System**: Windows 7/Server 2008 R2 or higher with full API support and future compatibility
-⚒️ **Compiler**: MinGW with C++11 standard library support and optimization capabilities
-📚 **Runtime Libraries**: advapi32.dll, ws2_32.dll, psapi.dll (included with Windows) with smart dependency management
-🔐 **Permissions**: Administrative privileges required for service installation and intelligent folder monitoring
-🌐 **Network Access**: Configurable port (default 8080) for web dashboard and API access with smart firewall detection
-
-## 📜 License and Support
-
-⚖️ **License**: MIT License - See LICENSE file for complete terms and conditions with future-ready licensing
-
-🆘 **Support Resources**:
-🌐 Web Dashboard: Real-time system diagnostics at http://localhost:8080 with intelligent troubleshooting
-💻 Command Line: Use `PatternTriggerCommand.exe status` for comprehensive system information with AI insights
-📝 Detailed Logging: Enable DetailedLogging=true for extensive debugging information with smart filtering
-📊 API Monitoring: Use `/api/metrics` endpoint for programmatic system monitoring with predictive analytics
+MIT License - Vedi file LICENSE per i dettagli.
 
 ---
 
-*🚀 Next-generation enterprise file automation solution with comprehensive monitoring, real-time visibility, and AI-ready pattern matching capabilities for the digital future.*
+*PatternTriggerCommand v3.0 - Monitoraggio multi-cartella con schedulatore parametrico e dashboard web integrata.*
