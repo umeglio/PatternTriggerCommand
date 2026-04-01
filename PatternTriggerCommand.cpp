@@ -1074,12 +1074,15 @@ void UpdateSystemMetrics() {
 
 void MetricsUpdateWorker() {
     WriteToLog("Avvio thread aggiornamento metriche");
-    
+
     while (!globalShutdown) {
         UpdateSystemMetrics();
-        Sleep(METRICS_UPDATE_INTERVAL);
+        // Sleep frazionato per rispondere rapidamente a globalShutdown
+        for (int i = 0; i < 50 && !globalShutdown; ++i) {
+            Sleep(100);
+        }
     }
-    
+
     WriteToLog("Thread aggiornamento metriche terminato");
 }
 
@@ -1460,7 +1463,7 @@ void SchedulerWorker() {
 
     while (!globalShutdown) {
         if (!schedulerEnabled) {
-            Sleep(SCHEDULER_CHECK_INTERVAL);
+            for (int i = 0; i < 150 && !globalShutdown; ++i) Sleep(100);
             continue;
         }
 
@@ -1517,7 +1520,8 @@ void SchedulerWorker() {
             }
         }
 
-        Sleep(SCHEDULER_CHECK_INTERVAL);
+        // Sleep frazionato per rispondere rapidamente a globalShutdown
+        for (int i = 0; i < 150 && !globalShutdown; ++i) Sleep(100);
     }
 
     WriteToLog("Thread schedulatore terminato");
@@ -2501,57 +2505,30 @@ DWORD WINAPI ServiceWorkerThread(LPVOID /*lpParam*/) {
         }
     }
     
-    // 2. Ferma schedulatore (TIMEOUT: 2 secondi)
+    // 2. Ferma schedulatore - globalShutdown gia' impostato, lo sleep frazionato lo sblocca in <100ms
     if (schedulerThread.joinable()) {
         WriteToLog("Arresto thread schedulatore...");
-        auto schedStartTime = GetTickCount();
-        while (GetTickCount() - schedStartTime < 2000) {
-            Sleep(100);
-            if (!schedulerThread.joinable()) break;
-        }
         try {
-            if (schedulerThread.joinable()) {
-                schedulerThread.join();
-                WriteToLog("Thread schedulatore arrestato");
-            }
+            schedulerThread.join();
+            WriteToLog("Thread schedulatore arrestato");
         } catch (...) {
-            WriteToLog("TIMEOUT schedulatore - detach forzato");
+            WriteToLog("ERRORE join schedulatore - detach forzato");
             schedulerThread.detach();
         }
     }
 
-    // 3. Ferma monitor cartelle (TIMEOUT: 3 secondi)
+    // 3. Ferma monitor cartelle
     WriteToLog("Arresto monitor cartelle...");
     StopAllFolderMonitors();
 
-    // 4. Ferma thread metriche (TIMEOUT: 1 secondo)
+    // 4. Ferma thread metriche - globalShutdown gia' impostato, lo sleep frazionato lo sblocca in <100ms
     if (metricsThread.joinable()) {
         WriteToLog("Arresto thread metriche...");
-        
-        auto metricsStartTime = GetTickCount();
-        bool metricsJoined = false;
-        
-        while (GetTickCount() - metricsStartTime < 1000 && !metricsJoined) {
-            try {
-                // Simula join con timeout
-                if (metricsThread.joinable()) {
-                    // Non c'è join_for in C++11, uso detach se necessario
-                    Sleep(100);
-                } else {
-                    metricsJoined = true;
-                }
-            } catch (...) {
-                break;
-            }
-        }
-        
         try {
-            if (metricsThread.joinable()) {
-                metricsThread.join();
-                WriteToLog("Thread metriche arrestato");
-            }
+            metricsThread.join();
+            WriteToLog("Thread metriche arrestato");
         } catch (...) {
-            WriteToLog("TIMEOUT metriche - detach forzato");
+            WriteToLog("ERRORE join metriche - detach forzato");
             metricsThread.detach();
         }
     }
@@ -2662,6 +2639,15 @@ BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) {
         std::cout << "\nInterruzione richiesta, attendere..." << std::endl;
         globalShutdown = true;
         webServerShouldStop = true;
+
+        // Chiudi handle directory per sbloccare ReadDirectoryChangesW
+        for (auto& monitorPair : folderMonitors) {
+            if (monitorPair.second->directoryHandle != INVALID_HANDLE_VALUE) {
+                CloseHandle(monitorPair.second->directoryHandle);
+                monitorPair.second->directoryHandle = INVALID_HANDLE_VALUE;
+            }
+        }
+
         if (stopEvent) {
             SetEvent(stopEvent);
         }
