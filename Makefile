@@ -1,4 +1,4 @@
-# Makefile per PatternTriggerCommand Multi-Folder v2.0
+# Makefile per PatternTriggerCommand Multi-Folder v3.1
 # Autore: Umberto Meglio - Supporto: Claude di Anthropic
 
 # Compilatore e flag ottimizzati
@@ -12,6 +12,8 @@ LDLIBS = -ladvapi32 -lkernel32 -luser32 -lws2_32 -lpsapi
 
 TARGET = PatternTriggerCommand.exe
 SRC = PatternTriggerCommand.cpp
+HDR = miraFONT_embedded.h
+FONTS = $(wildcard fonts/miraFONT/*.woff)
 
 # Colori per output (se supportati)
 COLOR_RESET = \033[0m
@@ -25,12 +27,12 @@ all: $(TARGET)
 	@echo "$(COLOR_GREEN)✓ Compilazione completata: $(TARGET)$(COLOR_RESET)"
 
 # Compilazione versione release
-$(TARGET): $(SRC)
-	@echo "$(COLOR_BLUE)Compilazione PatternTriggerCommand Multi-Folder v2.0...$(COLOR_RESET)"
+$(TARGET): $(SRC) $(HDR)
+	@echo "$(COLOR_BLUE)Compilazione PatternTriggerCommand Multi-Folder v3.1...$(COLOR_RESET)"
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS) $(LDLIBS)
 
 # Compilazione versione debug
-debug: $(SRC)
+debug: $(SRC) $(HDR)
 	@echo "$(COLOR_YELLOW)Compilazione versione debug...$(COLOR_RESET)"
 	$(CXX) $(CXXFLAGS_DEBUG) -o $(TARGET) $< $(LDFLAGS) $(LDLIBS)
 	@echo "$(COLOR_GREEN)✓ Versione debug compilata$(COLOR_RESET)"
@@ -40,6 +42,11 @@ release: clean
 	@echo "$(COLOR_BLUE)Compilazione versione release ottimizzata...$(COLOR_RESET)"
 	$(CXX) $(CXXFLAGS) -O3 -DNDEBUG -o $(TARGET) $(SRC) $(LDFLAGS) $(LDLIBS)
 	@echo "$(COLOR_GREEN)✓ Versione release ottimizzata compilata$(COLOR_RESET)"
+
+# Rigenera l'header con i font miraFONT incorporati (richiede Python 3)
+fonts: $(FONTS) tools/embed_fonts.py
+	@echo "$(COLOR_BLUE)Rigenerazione miraFONT_embedded.h...$(COLOR_RESET)"
+	python tools/embed_fonts.py
 
 # Pulizia file compilati
 clean:
@@ -153,7 +160,7 @@ logs:
 
 # Help esteso
 help:
-	@echo "$(COLOR_BLUE)PatternTriggerCommand Multi-Folder v2.0 - Targets disponibili:$(COLOR_RESET)"
+	@echo "$(COLOR_BLUE)PatternTriggerCommand Multi-Folder v3.1 - Targets disponibili:$(COLOR_RESET)"
 	@echo ""
 	@echo "$(COLOR_GREEN)Compilazione:$(COLOR_RESET)"
 	@echo "  all         - Compila il progetto (default)"
