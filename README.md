@@ -1,4 +1,4 @@
-# PatternTriggerCommand Multi-Folder v3.0
+# PatternTriggerCommand Multi-Folder v3.1
 
 **Autore: Umberto Meglio - Supporto allo sviluppo: Claude di Anthropic**
 
@@ -26,12 +26,19 @@ PatternTriggerCommand e' un servizio Windows che monitora cartelle multiple per 
 - Storico esecuzioni con filtri per nome e stato
 
 ### Dashboard Web
-- Interfaccia responsive HTML5 con tema chiaro
-- Top bar azzurro Napoli con striscia tricolore
-- Statistiche in tempo reale: file processati, comandi, errori, memoria, uptime
-- Tabelle cartelle monitorate e pattern configurati
-- Feed attivita' recente con timestamp
-- Auto-aggiornamento ogni 2 secondi
+- Interfaccia responsive HTML5 con tema scuro "miraNET", lo stesso stile grafico del sito umeglio.it
+- Tipografia interamente in **miraFONT** (Spline per i titoli, Linear per il testo, Dots per i numeri), il carattere originale di Umberto Meglio incorporato nell'eseguibile: nessuna dipendenza da internet
+- Statistiche in tempo reale: file processati, comandi, errori, memoria, thread, uptime
+- Grafici: andamento ultime 24 ore (file, comandi ed errori al minuto), distribuzione oraria di oggi, memoria del servizio, pattern piu' attivi, esito dello schedulatore
+- Tabelle cartelle monitorate e pattern configurati, feed attivita' recente con orario reale
+- Indicatore di connessione con il servizio e notifiche toast al posto dei popup
+- Auto-aggiornamento ogni 2 secondi (grafici ogni 15 secondi)
+
+### Pagina Impostazioni
+- Modifica di tutta la configurazione del servizio direttamente dal browser: cartelle, file di log, database file processati, log dettagliato, schedulatore, porta e stato del web server
+- Editor dei pattern a tabella (nome, cartella, regex, comando) con validazione della regex e prova su un nome file
+- Salvataggio atomico su `config.ini` e **applicazione a caldo**: i monitor vengono riavviati senza fermare il servizio; se cambia la porta il web server si riavvia da solo sul nuovo indirizzo
+- Pulsante "Ricarica da disco" per applicare modifiche fatte a mano al file
 
 ### Pagina Schedulatore
 - Gestione task: crea, modifica, duplica, elimina
@@ -44,7 +51,13 @@ PatternTriggerCommand e' un servizio Windows che monitora cartelle multiple per 
 ### REST API
 - `GET /` - Dashboard principale
 - `GET /scheduler` - Pagina gestione schedulatore
+- `GET /settings` - Pagina impostazioni del servizio
 - `GET /api/metrics` - Metriche di sistema in JSON
+- `GET /api/stats` - Serie storiche e statistiche per i grafici (campione ogni minuto, ultime 24 ore)
+- `GET /api/config` - Configurazione corrente in JSON
+- `POST /api/config/save` - Salva `config.ini` e applica la configurazione a caldo
+- `POST /api/config/reload` - Rilegge `config.ini` dal disco e riavvia i monitor
+- `GET /fonts/<nome>.woff` - Font miraFONT incorporati
 - `GET /api/scheduler` - Task schedulati e storico in JSON
 - `GET /api/scheduler/scripts` - Elenco script disponibili
 - `POST /api/scheduler/save` - Salva/modifica task
@@ -71,7 +84,7 @@ PatternTriggerCommand.exe install
 ```bash
 PatternTriggerCommand.exe test
 ```
-Apri `http://localhost:8080` per la dashboard e `http://localhost:8080/scheduler` per lo schedulatore.
+Apri `http://localhost:8080` per la dashboard, `http://localhost:8080/scheduler` per lo schedulatore e `http://localhost:8080/settings` per le impostazioni.
 
 ## Configurazione
 
@@ -137,6 +150,17 @@ La dashboard mostra in tempo reale:
 | Cartelle | Tabella con stato, percorso, file rilevati/processati |
 | Pattern | Tabella con nome, cartella, regex, match, esecuzioni |
 
+### Impostazioni (`http://localhost:8080/settings`)
+
+| Sezione | Contenuto |
+|---------|-----------|
+| Percorsi | Cartella monitorata predefinita, cartella task, file di log, log dettagliato, database file processati |
+| Servizio | Interruttori log dettagliato / schedulatore / web server, porta del web server |
+| Pattern e comandi | Tabella modificabile dei pattern con prova regex su un nome file, aggiunta e rimozione righe |
+| Barra di salvataggio | Indicatore modifiche non salvate, "Annulla modifiche", "Salva e applica" |
+
+Il salvataggio riscrive `C:\PTC\config.ini` e chiede al servizio di ricaricarsi a caldo: i monitor delle cartelle vengono fermati e riavviati con i nuovi pattern, lo schedulatore rilegge la sua cartella e, se porta o stato del web server sono cambiati, il web server viene riavviato. Disattivando il web server dalla pagina la dashboard non sara' piu' raggiungibile: si riattiva da `config.ini`.
+
 ### Schedulatore (`http://localhost:8080/scheduler`)
 
 | Sezione | Contenuto |
@@ -193,6 +217,18 @@ Pattern3=C:\Contratti|^contract_.*_signed\.pdf$|C:\Scripts\archive_contract.bat
 Pattern1=C:\Logs|^app_[0-9]{8}_[0-9]{6}\.log$|C:\Scripts\analyze_logs.bat
 Pattern2=C:\Backups|^db_backup_.*\.sql\.gz$|C:\Scripts\verify_backup.bat
 Pattern3=C:\Config|^config_v[0-9]+\.[0-9]+\.xml$|C:\Scripts\deploy_config.bat
+```
+
+## Web server
+
+Il web server integrato serve ogni connessione in un thread dedicato, legge le richieste per intero (intestazioni e body secondo `Content-Length`) e invia le risposte fino all'ultimo byte: le pagine non arrivano piu' troncate e le richieste POST non vanno perse, difetti presenti nella versione 3.0 dove il socket accettato ereditava la modalita' non bloccante. Le regex nel file di configurazione possono contenere `|` (alternanze) se la cartella e' indicata esplicitamente.
+
+## miraFONT
+
+I file WOFF in `fonts/miraFONT/` (licenza CC0, da https://github.com/umeglio/miraFONT) vengono incorporati nell'eseguibile tramite l'header `miraFONT_embedded.h`, generato con:
+
+```bash
+python tools/embed_fonts.py      # oppure: mingw32-make fonts
 ```
 
 ## Architettura Tecnica
