@@ -1722,7 +1722,7 @@ std::string GetCommonCss() {
 @font-face{font-family:'miraFONT Spline';font-style:normal;font-weight:700;font-display:swap;src:url('/fonts/miraFONT-Bold-Spline.woff') format('woff');}
 @font-face{font-family:'miraFONT Linear';font-style:normal;font-weight:400;font-display:swap;src:url('/fonts/miraFONT-Regular-Linear.woff') format('woff');}
 @font-face{font-family:'miraFONT';font-style:normal;font-weight:400;font-display:swap;src:url('/fonts/miraFONT-Regular-Dots.woff') format('woff');}
-:root{--bg:#03060f;--bg-2:#081026;--panel:#0a1430;--panel-2:#060d20;--surface:#0a1430;--surface2:#060d20;--line:rgba(47,208,255,0.16);--line-strong:rgba(47,208,255,0.4);--border:rgba(47,208,255,0.16);--cyan:#2fd0ff;--cyan-soft:#a8ecff;--blue:#1e7bff;--primary:#2fd0ff;--primary-dark:#1e7bff;--primary-bg:rgba(47,208,255,0.08);--green:#7dffb0;--green-bg:rgba(125,255,176,0.1);--red:#ff5f57;--red-bg:rgba(255,95,87,0.12);--warning:#ffcf6b;--warning-bg:rgba(255,207,107,0.12);--purple:#c792ea;--purple-bg:rgba(199,146,234,0.12);--text:#d6ecff;--text2:#8fb6e0;--text3:#6a82ab;--radius:11px;--shadow:0 0 30px rgba(47,208,255,0.06),inset 0 0 20px rgba(0,0,0,0.35);--font-display:'miraFONT Spline','Courier New',monospace;--font-body:'miraFONT Linear',ui-monospace,'Cascadia Mono','Courier New',monospace;--font-dots:'miraFONT',ui-monospace,'Courier New',monospace;}
+:root{--bg:#03060f;--bg-2:#081026;--panel:#0a1430;--panel-2:#060d20;--surface:#0a1430;--surface2:#060d20;--line:rgba(47,208,255,0.16);--line-strong:rgba(47,208,255,0.4);--border:rgba(47,208,255,0.16);--cyan:#2fd0ff;--cyan-soft:#a8ecff;--blue:#1e7bff;--primary:#2fd0ff;--primary-dark:#1e7bff;--primary-bg:rgba(47,208,255,0.08);--green:#7dffb0;--green-bg:rgba(125,255,176,0.1);--red:#ff5f57;--red-bg:rgba(255,95,87,0.12);--warning:#ffcf6b;--warning-bg:rgba(255,207,107,0.12);--purple:#c792ea;--purple-bg:rgba(199,146,234,0.12);--text:#d6ecff;--text2:#8fb6e0;--text3:#6a82ab;--radius:11px;--shadow:0 0 30px rgba(47,208,255,0.06),inset 0 0 20px rgba(0,0,0,0.35);--font-display:'miraFONT Spline','Courier New',monospace;--font-body:'miraFONT Spline','Courier New',monospace;--font-linear:'miraFONT Linear',ui-monospace,'Cascadia Mono','Courier New',monospace;--font-dots:'miraFONT',ui-monospace,'Courier New',monospace;}
 *{margin:0;padding:0;box-sizing:border-box;}
 html{scroll-behavior:smooth;}
 body{font-family:var(--font-body);font-size:15px;line-height:1.6;background-color:var(--bg);background-image:radial-gradient(ellipse 80% 50% at 50% -10%,rgba(30,123,255,0.14),transparent),linear-gradient(rgba(47,208,255,0.025) 1px,transparent 1px),linear-gradient(90deg,rgba(47,208,255,0.025) 1px,transparent 1px);background-size:100% 100%,40px 40px,40px 40px;color:var(--text);min-height:100vh;display:flex;flex-direction:column;-webkit-font-smoothing:antialiased;}
@@ -1744,7 +1744,7 @@ h1,h2,h3,.stat-label,.card-title,.brand-name,th,.tab,.btn,.page-head h2{font-fam
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(125,255,176,0.6);}70%{box-shadow:0 0 0 7px rgba(125,255,176,0);}100%{box-shadow:0 0 0 0 rgba(125,255,176,0);}}
 .top-stripe{height:2px;background:linear-gradient(90deg,transparent,var(--cyan) 30%,var(--blue) 70%,transparent);opacity:0.8;}
 .main{max-width:1440px;width:100%;margin:0 auto;padding:26px 24px;flex:1;}
-.prompt{font-family:var(--font-body);color:var(--text3);font-size:0.8em;margin-bottom:6px;letter-spacing:0.04em;}
+.prompt{font-family:var(--font-linear);color:var(--text3);font-size:0.8em;margin-bottom:6px;letter-spacing:0.04em;}
 .prompt b{color:var(--green);font-weight:400;}
 .prompt i{color:var(--cyan);font-style:normal;}
 .page-head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;margin-bottom:22px;flex-wrap:wrap;}
@@ -1796,7 +1796,7 @@ td.num{text-align:right;font-family:var(--font-dots);color:var(--cyan-soft);}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0;}
 .dot-on{background:var(--green);box-shadow:0 0 8px rgba(125,255,176,0.8);}
 .dot-off{background:var(--red);box-shadow:0 0 6px rgba(255,95,87,0.6);}
-.mono{font-family:var(--font-body);font-size:0.86em;color:var(--cyan-soft);background:rgba(47,208,255,0.07);padding:2px 8px;border-radius:5px;word-break:break-all;border:1px solid rgba(47,208,255,0.1);}
+.mono{font-family:var(--font-linear);font-size:0.86em;color:var(--cyan-soft);background:rgba(47,208,255,0.07);padding:2px 8px;border-radius:5px;word-break:break-all;border:1px solid rgba(47,208,255,0.1);}
 .muted{color:var(--text3);}
 .btn{padding:9px 16px;border:1px solid transparent;border-radius:9px;cursor:pointer;font-size:0.78em;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;transition:all 0.2s;display:inline-flex;align-items:center;gap:7px;line-height:1.2;text-decoration:none;}
 .btn svg{width:14px;height:14px;}
@@ -1863,7 +1863,7 @@ td.num{text-align:right;font-family:var(--font-dots);color:var(--cyan-soft);}
 .activity-item.err .adot{background:var(--red);box-shadow:0 0 6px rgba(255,95,87,0.6);}
 .activity-item.ok .adot{background:var(--green);box-shadow:0 0 6px rgba(125,255,176,0.6);}
 .activity-msg{color:var(--text2);flex:1;word-break:break-word;}
-.activity-time{color:var(--text3);font-size:0.8em;white-space:nowrap;font-family:var(--font-dots);}
+.activity-time{color:var(--text3);font-size:0.8em;white-space:nowrap;font-family:var(--font-linear);}
 .loading{text-align:center;padding:60px;color:var(--text2);font-size:1em;letter-spacing:0.1em;}
 .alert{padding:13px 16px;border-radius:10px;margin-bottom:16px;font-size:0.88em;display:flex;gap:10px;align-items:flex-start;line-height:1.5;border:1px solid;}
 .alert svg{width:18px;height:18px;flex-shrink:0;margin-top:1px;}
@@ -1882,7 +1882,7 @@ td.num{text-align:right;font-family:var(--font-dots);color:var(--cyan-soft);}
 .save-bar .status.dirty{color:var(--warning);}
 .pattern-table td{padding:6px 8px;}
 .pattern-table input{width:100%;padding:7px 10px;border:1px solid var(--line);border-radius:7px;font-size:0.86em;font-family:var(--font-body);background:#010409;color:var(--text);}
-.pattern-table input.mono-in{color:var(--cyan-soft);}
+.pattern-table input.mono-in{font-family:var(--font-linear);color:var(--cyan-soft);}
 .pattern-table input:focus{outline:none;border-color:var(--cyan);box-shadow:0 0 0 3px rgba(47,208,255,0.15);}
 .pattern-table input.bad{border-color:var(--red);background:var(--red-bg);}
 .pattern-table input.hit{border-color:var(--green);background:var(--green-bg);}
